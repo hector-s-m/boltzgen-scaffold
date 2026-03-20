@@ -1,4 +1,4 @@
-path: gontivimab.cif
+path: gontivimab.pdb
 include: 
   - chain: 
       id: A

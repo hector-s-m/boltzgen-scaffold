@@ -8,7 +8,7 @@ freely to develop additional complementarity against the target.
 
 Usage:
     python graft_motif.py \\
-        --input complex.cif \\
+        --input complex.pdb \\
         --scaffold example/nanobody_scaffolds/7eow.yaml \\
         --output designs/my_graft.yaml
 
@@ -68,8 +68,8 @@ def parse_scaffold_yaml(scaffold_path):
     """Parse a BoltzGen nanobody scaffold YAML to extract CDR info.
 
     Returns a dict with:
-        - cif_path: absolute path to the scaffold CIF file
-        - chain_id: chain identifier in the CIF
+        - pdb_path: absolute path to the scaffold PDB file
+        - chain_id: chain identifier in the PDB
         - cdrs: list of 3 (start, end) tuples for CDR1, CDR2, CDR3
         - excludes: list of lists of (start, end) tuples per CDR
         - insertions: list of dicts with id, res_index, num_residues per CDR
@@ -80,7 +80,10 @@ def parse_scaffold_yaml(scaffold_path):
         data = yaml.safe_load(f)
 
     chain_id = data["include"][0]["chain"]["id"]
-    cif_path = (scaffold_path.parent / data["path"]).resolve()
+    pdb_path = (scaffold_path.parent / data["path"]).resolve()
+    if not pdb_path.exists() and pdb_path.suffix == ".cif":
+        # Try .pdb fallback if .cif referenced but not found
+        pdb_path = pdb_path.with_suffix(".pdb")
 
     # Parse CDR design ranges (expect 3: CDR1, CDR2, CDR3)
     design_str = data["design"][0]["chain"]["res_index"]
@@ -130,7 +133,7 @@ def parse_scaffold_yaml(scaffold_path):
                     extra_vis0.append(vr)
 
     return {
-        "cif_path": cif_path,
+        "pdb_path": pdb_path,
         "chain_id": chain_id,
         "cdrs": cdrs,
         "excludes": excludes_per_cdr,
@@ -139,34 +142,21 @@ def parse_scaffold_yaml(scaffold_path):
     }
 
 
-def detect_chains(cif_path):
+def detect_chains(pdb_path):
     """Auto-detect target and motif chains. Larger chain = target, smaller = motif."""
-    try:
-        import gemmi
-
-        st = gemmi.read_structure(str(cif_path))
-        model = st[0]
-        chains = []
-        for chain in model:
-            polymer = chain.get_polymer()
-            n_res = sum(1 for _ in polymer)
-            chains.append((chain.name, n_res))
-    except ImportError:
-        # Fallback: parse ATOM records manually
-        chains = {}
-        with open(cif_path) as f:
-            for line in f:
-                if line.startswith(("ATOM", "HETATM")):
-                    # PDB format
-                    chain_id = line[21]
-                    if chain_id not in chains:
-                        chains[chain_id] = set()
-                    try:
-                        res_num = int(line[22:26].strip())
-                        chains[chain_id].add(res_num)
-                    except ValueError:
-                        pass
-        chains = [(cid, len(residues)) for cid, residues in chains.items()]
+    chains = {}
+    with open(pdb_path) as f:
+        for line in f:
+            if line.startswith(("ATOM", "HETATM")):
+                chain_id = line[21]
+                if chain_id not in chains:
+                    chains[chain_id] = set()
+                try:
+                    res_num = int(line[22:26].strip())
+                    chains[chain_id].add(res_num)
+                except ValueError:
+                    pass
+    chains = [(cid, len(residues)) for cid, residues in chains.items()]
 
     if len(chains) < 2:
         print(
@@ -190,7 +180,7 @@ def make_relative(path, relative_to):
 
 
 def generate_graft_yaml(
-    input_cif,
+    input_pdb,
     target_chain,
     motif_chain,
     scaffold_info,
@@ -218,8 +208,8 @@ def generate_graft_yaml(
     chain_id = scaffold_info["chain_id"]
 
     # Resolve paths relative to output directory
-    input_rel = make_relative(Path(input_cif).resolve(), output_dir)
-    scaffold_cif_rel = make_relative(scaffold_info["cif_path"], output_dir)
+    input_rel = make_relative(Path(input_pdb).resolve(), output_dir)
+    scaffold_pdb_rel = make_relative(scaffold_info["pdb_path"], output_dir)
 
     # Split CDRs into pre-graft and post-graft groups
     pre_cdrs = [(i, scaffold_info["cdrs"][i]) for i in range(len(scaffold_info["cdrs"])) if i < cdr_idx]
@@ -275,7 +265,7 @@ def generate_graft_yaml(
 
     pre_framework = {
         "file": {
-            "path": scaffold_cif_rel,
+            "path": scaffold_pdb_rel,
             "include": [
                 {"chain": {"id": chain_id, "res_index": f"..{cdr_start - 1}"}}
             ],
@@ -353,7 +343,7 @@ def generate_graft_yaml(
 
     post_framework = {
         "file": {
-            "path": scaffold_cif_rel,
+            "path": scaffold_pdb_rel,
             "fuse": chain_id,
             "include": [
                 {"chain": {"id": chain_id, "res_index": f"{cdr_end + 1}.."}}
@@ -407,7 +397,7 @@ def main():
         epilog="""\
 Example:
     python graft_motif.py \\
-        --input complex.cif \\
+        --input complex.pdb \\
         --scaffold example/nanobody_scaffolds/7eow.yaml \\
         --output designs/my_graft.yaml
 
@@ -418,7 +408,7 @@ Example:
     parser.add_argument(
         "--input",
         required=True,
-        help="Input CIF/PDB with target + motif chains (already docked)",
+        help="Input PDB file with target + motif chains (already docked)",
     )
     parser.add_argument(
         "--target-chain",
@@ -501,7 +491,7 @@ Example:
     if len(scaffold_infos) == 1:
         # Single scaffold: generate one YAML
         design = generate_graft_yaml(
-            input_cif=args.input,
+            input_pdb=args.input,
             target_chain=target_chain,
             motif_chain=motif_chain,
             scaffold_info=scaffold_infos[0],
@@ -521,7 +511,7 @@ Example:
             scaffold_name = Path(args.scaffold[i]).stem
             out_file = output_path.parent / f"{stem}_{scaffold_name}{suffix}"
             design = generate_graft_yaml(
-                input_cif=args.input,
+                input_pdb=args.input,
                 target_chain=target_chain,
                 motif_chain=motif_chain,
                 scaffold_info=scaffold_info,

@@ -1,5 +1,5 @@
 # Vobarilizumab
-path: 7xl0.cif
+path: 7xl0.pdb
 include: 
   - chain: 
       id: A

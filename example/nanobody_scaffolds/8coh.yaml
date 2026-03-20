@@ -1,5 +1,5 @@
 # gefurulimab
-path: 8coh.cif
+path: 8coh.pdb
 include: 
   - chain: 
       id: A

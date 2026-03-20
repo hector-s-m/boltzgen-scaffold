@@ -1,4 +1,4 @@
-path: isecarosmab.cif
+path: isecarosmab.pdb
 include: 
   - chain: 
       id: A

@@ -1,4 +1,4 @@
-path: sonelokimab.cif
+path: sonelokimab.pdb
 include: 
   - chain: 
       id: A
