@@ -1,5 +1,5 @@
 # ozoralizumab
-path: 8z8v.cif
+path: 8z8v.pdb
 include: 
   - chain: 
       id: B
