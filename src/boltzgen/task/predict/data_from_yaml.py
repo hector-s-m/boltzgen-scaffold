@@ -206,6 +206,12 @@ class PredictionDataset(torch.utils.data.Dataset):
         structure = parsed.structure
         design_info = parsed.design_info
 
+        # Read motif_noise from YAML (σ in Å for template coordinate perturbation)
+        import yaml as _yaml
+        with open(path) as _f:
+            _yaml_data = _yaml.safe_load(_f)
+        motif_noise_sigma = float(_yaml_data.get("motif_noise", 0.0))
+
         # Tokenize structure
         tokenized = self.dataset.tokenizer.tokenize(structure)
 
@@ -283,6 +289,24 @@ class PredictionDataset(torch.utils.data.Dataset):
 
         # set chain_design_mask
         features["chain_design_mask"] = torch.from_numpy(chain_design_mask)
+
+        # Apply motif noise: add Gaussian noise to template coordinates of
+        # fixed residues on the design chain (motif/framework with visibility>0).
+        # This softens the structural prior, allowing the diffusion model some
+        # flexibility in positioning the motif for better designability.
+        if motif_noise_sigma > 0:
+            structure_group = features.get("structure_group", None)
+            design_mask = features.get("design_mask", None)
+            if structure_group is not None and design_mask is not None:
+                # Motif tokens: on the design chain, not designed, with structure
+                motif_mask = (
+                    torch.from_numpy(chain_design_mask).bool()
+                    & ~design_mask.bool()
+                    & (structure_group > 0)
+                )
+                if motif_mask.any():
+                    noise = torch.randn_like(features["center_coords"]) * motif_noise_sigma
+                    features["center_coords"][motif_mask] += noise[motif_mask]
 
         # Compute template features
         templates_features = load_dummy_templates(

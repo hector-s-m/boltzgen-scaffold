@@ -189,6 +189,78 @@ def detect_chains(pdb_path):
     return target, motif
 
 
+def detect_fragments(pdb_path, chain_id, bond_cutoff=2.0):
+    """Detect contiguous fragments in a PDB chain by peptide bond distance.
+
+    Groups residues into fragments where consecutive residues are connected
+    by a peptide bond (C of residue i to N of residue i+1 within cutoff).
+    Disconnected residues start new fragments.
+
+    Parameters
+    ----------
+    pdb_path : str or Path
+        Path to the PDB file.
+    chain_id : str
+        Chain identifier to analyze.
+    bond_cutoff : float
+        Maximum C→N distance (Å) to consider residues connected. Default 2.0.
+
+    Returns
+    -------
+    list of list of int
+        Each inner list is a contiguous fragment of residue numbers.
+        E.g., [[88, 89], [91]] means residues 88-89 are connected, 91 is isolated.
+    """
+    import math as _math
+
+    # Parse C and N backbone atom positions per residue
+    residues = {}  # res_num -> {"N": (x,y,z), "C": (x,y,z)}
+    with open(pdb_path) as f:
+        for line in f:
+            if not line.startswith("ATOM"):
+                continue
+            if line[21] != chain_id:
+                continue
+            atom_name = line[12:16].strip()
+            if atom_name not in ("C", "N"):
+                continue
+            try:
+                res_num = int(line[22:26].strip())
+                x = float(line[30:38])
+                y = float(line[38:46])
+                z = float(line[46:54])
+            except ValueError:
+                continue
+            if res_num not in residues:
+                residues[res_num] = {}
+            residues[res_num][atom_name] = (x, y, z)
+
+    if not residues:
+        return []
+
+    sorted_res = sorted(residues.keys())
+    fragments = [[sorted_res[0]]]
+
+    for i in range(1, len(sorted_res)):
+        prev_res = sorted_res[i - 1]
+        curr_res = sorted_res[i]
+
+        # Check if C of prev and N of curr are within bond distance
+        connected = False
+        if "C" in residues.get(prev_res, {}) and "N" in residues.get(curr_res, {}):
+            c_xyz = residues[prev_res]["C"]
+            n_xyz = residues[curr_res]["N"]
+            dist = _math.sqrt(sum((a - b) ** 2 for a, b in zip(c_xyz, n_xyz)))
+            connected = dist <= bond_cutoff
+
+        if connected:
+            fragments[-1].append(curr_res)
+        else:
+            fragments.append([curr_res])
+
+    return fragments
+
+
 def make_relative(path, relative_to):
     """Make a path relative to a directory."""
     try:
@@ -253,13 +325,16 @@ def generate_graft_yaml(
     flank_n="2..5",
     flank_c="2..5",
     cdr_lengths=None,
+    linker_length="1..6",
+    motif_noise=0.0,
 ):
     """Generate a BoltzGen design YAML for motif grafting.
 
     The generated YAML constructs the nanobody chain by fusing:
     1. Framework pre-graft CDR (with other CDRs designed normally)
     2. N-terminal designed flank
-    3. Grafted motif (fixed structure, anchored to target)
+    3. Grafted motif (fixed structure, anchored to target) — or alternating
+       hotspot fragments + designed linkers if the motif is disconnected
     4. C-terminal designed flank
     5. Framework post-graft CDR
 
@@ -268,11 +343,18 @@ def generate_graft_yaml(
     global position determined by the model). All non-motif CDR residues are
     designed freely to develop complementarity against the target.
 
+    If the motif chain contains disconnected fragments (no peptide bond between
+    consecutive residues), the script automatically switches to **hotspot mode**:
+    each fragment is anchored independently and designed linkers connect them.
+
     Parameters
     ----------
     cdr_lengths : dict, optional
         Override CDR lengths for non-graft CDRs. Keys are CDR numbers (1, 2, 3),
         values are length specs like '5..13' or '10'. If None, uses natural defaults.
+    linker_length : str
+        Length range for designed linkers between hotspot fragments (default: '1..6').
+        Only used in hotspot mode (disconnected motif).
     """
     if cdr_lengths is None:
         cdr_lengths = {}
@@ -366,20 +448,68 @@ def generate_graft_yaml(
     # --- Entity 3: N-terminal CDR flank (designed) ---
     n_flank = {"protein": {"id": "NF", "fuse": chain_id, "sequence": flank_n}}
 
-    # --- Entity 4: Grafted motif (fixed structure, visibility 1) ---
-    # The motif is explicitly marked as not_design to ensure its sequence is
-    # preserved during inverse folding and never redesigned.
-    motif_entity = {
-        "file": {
-            "path": input_rel,
-            "fuse": chain_id,
-            "include": [{"chain": {"id": motif_chain}}],
-            "not_design": [{"chain": {"id": motif_chain}}],
-            "structure_groups": [
-                {"group": {"id": motif_chain, "visibility": 1}},
-            ],
-        }
-    }
+    # --- Entity 4: Grafted motif / hotspot fragments ---
+    # Detect whether motif is contiguous or disconnected
+    fragments = detect_fragments(input_pdb, motif_chain)
+    if len(fragments) <= 1:
+        # Contiguous motif: single entity (original behavior)
+        # The motif is explicitly marked as not_design to ensure its sequence is
+        # preserved during inverse folding and never redesigned.
+        motif_entities = [
+            {
+                "file": {
+                    "path": input_rel,
+                    "fuse": chain_id,
+                    "include": [{"chain": {"id": motif_chain}}],
+                    "not_design": [{"chain": {"id": motif_chain}}],
+                    "structure_groups": [
+                        {"group": {"id": motif_chain, "visibility": 1}},
+                    ],
+                }
+            }
+        ]
+        print(
+            f"  Motif: contiguous ({len(fragments[0]) if fragments else 0} residues)",
+            file=sys.stderr,
+        )
+    else:
+        # Hotspot mode: alternating fragment + designed linker entities
+        motif_entities = []
+        total_hotspot_res = sum(len(f) for f in fragments)
+        print(
+            f"  Motif: {len(fragments)} disconnected fragments "
+            f"({total_hotspot_res} hotspot residues, linkers: {linker_length})",
+            file=sys.stderr,
+        )
+        for i, fragment in enumerate(fragments):
+            # Fragment entity: anchored, not designed
+            res_index = format_range(fragment[0], fragment[-1])
+            frag_entity = {
+                "file": {
+                    "path": input_rel,
+                    "fuse": chain_id,
+                    "include": [
+                        {"chain": {"id": motif_chain, "res_index": res_index}}
+                    ],
+                    "not_design": [{"chain": {"id": motif_chain}}],
+                    "structure_groups": [
+                        {"group": {"id": motif_chain, "visibility": 1}},
+                    ],
+                }
+            }
+            motif_entities.append(frag_entity)
+
+            # Designed linker between fragments (not after last)
+            if i < len(fragments) - 1:
+                linker_id = f"LK{i + 1}"
+                linker_entity = {
+                    "protein": {
+                        "id": linker_id,
+                        "fuse": chain_id,
+                        "sequence": linker_length,
+                    }
+                }
+                motif_entities.append(linker_entity)
 
     # --- Entity 5: C-terminal CDR flank (designed) ---
     c_flank = {"protein": {"id": "CF", "fuse": chain_id, "sequence": flank_c}}
@@ -442,16 +572,14 @@ def generate_graft_yaml(
         post_framework["file"]["design_insertions"] = post_insertions
 
     # Assemble the full design YAML
-    design = {
-        "entities": [
-            target_entity,
-            pre_framework,
-            n_flank,
-            motif_entity,
-            c_flank,
-            post_framework,
-        ]
-    }
+    entities = [target_entity, pre_framework, n_flank]
+    entities.extend(motif_entities)
+    entities.extend([c_flank, post_framework])
+    design = {"entities": entities}
+
+    # Add motif noise if specified (σ in Å for template coordinate perturbation)
+    if motif_noise > 0:
+        design["motif_noise"] = motif_noise
 
     return design
 
@@ -547,6 +675,19 @@ Example:
         help=f"CDR3 length range, e.g. '8..20' (default: {DEFAULT_CDR_LENGTHS[3]})",
     )
     parser.add_argument(
+        "--linker-length",
+        default="1..6",
+        help="Linker length range between hotspot fragments (default: 1..6). "
+             "Only used when the motif chain has disconnected residues.",
+    )
+    parser.add_argument(
+        "--motif-noise",
+        type=float,
+        default=0.0,
+        help="Gaussian noise σ (Å) added to motif template coordinates for soft rigidity. "
+             "0 = rigid (default), 0.3 = slight flex, 1.0 = loose.",
+    )
+    parser.add_argument(
         "--list-scaffolds",
         action="store_true",
         help="List available nanobody scaffolds and exit",
@@ -613,6 +754,8 @@ Example:
             flank_n=args.flank_n,
             flank_c=args.flank_c,
             cdr_lengths=cdr_lengths,
+            linker_length=args.linker_length,
+            motif_noise=args.motif_noise,
         )
         with open(output_path, "w") as f:
             yaml.dump(design, f, default_flow_style=False, sort_keys=False)

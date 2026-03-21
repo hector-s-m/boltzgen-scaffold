@@ -339,6 +339,8 @@ yaml_keys = [
     "symmetric_group",
     # Per-residue amino acid constraints
     "residue_constraints",
+    # Motif noise (Å standard deviation applied to fixed-residue template coords)
+    "motif_noise",
     "position",
     "allowed",
     "disallowed",
