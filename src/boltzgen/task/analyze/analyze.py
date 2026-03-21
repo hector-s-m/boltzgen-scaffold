@@ -32,6 +32,10 @@ from boltzgen.task.analyze.analyze_utils import (
     save_design_only_structure_to_pdb,
     vendi_scores,
     vendi_sequences,
+    compute_pdockq,
+    compute_pdockq2,
+    compute_lis,
+    _prepare_interface_data,
 )
 from matplotlib import pyplot as plt
 import matplotlib as mpl
@@ -275,15 +279,21 @@ class Analyze(Task):
         assert len(sample_ids) > 0
 
         all_metrics, all_data = [], []
+        skipped = []
         for sample_id in tqdm(
             sample_ids, desc=f"Loading saved metrics from disk. 1% of total"
         ):
-            data = np.load(
-                self.metrics_dir / f"data_{sample_id}.npz", allow_pickle=True
-            )
-            metrics = np.load(
-                self.metrics_dir / f"metrics_{sample_id}.npz", allow_pickle=True
-            )
+            try:
+                data = np.load(
+                    self.metrics_dir / f"data_{sample_id}.npz", allow_pickle=True
+                )
+                metrics = np.load(
+                    self.metrics_dir / f"metrics_{sample_id}.npz", allow_pickle=True
+                )
+            except OSError as e:
+                print(f"Warning: skipping corrupt file for sample {sample_id}: {e}")
+                skipped.append(sample_id)
+                continue
             data = {
                 k: v.item() if v.shape == () else torch.tensor(v)
                 for k, v in data.items()
@@ -294,6 +304,8 @@ class Analyze(Task):
             }
             all_metrics.append(metrics)
             all_data.append(data)
+        if skipped:
+            print(f"Warning: skipped {len(skipped)} corrupt samples: {skipped}")
         df = pd.DataFrame(all_metrics)
 
         # Cast per-motif integer fields and reconstruct a consolidated details column
@@ -1001,6 +1013,18 @@ class Analyze(Task):
                 fold_metrics_bb = {f"{k}": v for k, v in fold_metrics_bb.items()}
                 metrics.update(fold_metrics_bb)
 
+            # Compute pDockQ, pDockQ2, LIS from refolding output
+            try:
+                idata = _prepare_interface_data(folded, feat)
+                metrics["pdockq"] = compute_pdockq(folded, feat, _cache=idata)
+                metrics["pdockq2"] = compute_pdockq2(folded, feat, _cache=idata)
+                metrics["lis"] = compute_lis(folded, feat, _cache=idata)
+            except (KeyError, IndexError, ValueError, TypeError) as e:
+                print(f"Warning: docking metrics failed for {feat.get('id', '?')}: {e}")
+                metrics.setdefault("pdockq", float("nan"))
+                metrics.setdefault("pdockq2", float("nan"))
+                metrics.setdefault("lis", float("nan"))
+
             # Construct features for refolded complex
             feat_out = {}
             for k in feat.keys():
@@ -1118,6 +1142,42 @@ class Analyze(Task):
             bb_out = feat_out["coords"][bb_design_mask].reshape(-1, 4, 3)
             ca_coords_refolded = bb_out[:, 1, :].cpu()
 
+            # Compute RMSD of fixed (non-designed) residues in the design chain
+            # between the original generated structure and the refolded structure.
+            # For motif grafting, this measures whether the grafted motif maintains
+            # its designed conformation after refolding.
+            fixed_in_design_chain = (
+                chain_design_mask
+                & (~design_mask)
+                & feat["token_resolved_mask"].bool()
+            )
+            if fixed_in_design_chain.sum() > 0:
+                # All-atom RMSD of fixed residues
+                atom_fixed_mask = (
+                    (
+                        feat["atom_to_token"].float()
+                        @ fixed_in_design_chain.unsqueeze(-1).float()
+                    )
+                    .bool()
+                    .squeeze()
+                )
+                resolved_fixed = atom_fixed_mask & feat["atom_resolved_mask"].bool()
+                orig_fixed_coords = feat["coords"][0][resolved_fixed][None, ...]
+                refold_fixed_coords = feat_out["coords"][resolved_fixed][None, ...]
+                if orig_fixed_coords.shape[1] > 0 and orig_fixed_coords.shape == refold_fixed_coords.shape:
+                    metrics["fixed_residues_rmsd_refolded"] = compute_rmsd(
+                        orig_fixed_coords, refold_fixed_coords
+                    ).item()
+
+                # Backbone-only RMSD of fixed residues
+                bb_fixed = resolved_fixed & feat["backbone_mask"].bool()
+                orig_bb_fixed = feat["coords"][0][bb_fixed][None, ...]
+                refold_bb_fixed = feat_out["coords"][bb_fixed][None, ...]
+                if orig_bb_fixed.shape[1] > 0 and orig_bb_fixed.shape == refold_bb_fixed.shape:
+                    metrics["fixed_residues_bb_rmsd_refolded"] = compute_rmsd(
+                        orig_bb_fixed, refold_bb_fixed
+                    ).item()
+
         # Affinity metrics
         if self.affinity_metrics:
             affinity_path = (
@@ -1149,6 +1209,13 @@ class Analyze(Task):
                     metrics[key] = feat[key].item()
                 elif isinstance(feat[key], (float, int)):
                     metrics[key] = feat[key]
+
+        # Compute ipSAE_max = max(design_to_target_ipsae, target_to_design_ipsae)
+        if "design_to_target_ipsae" in metrics and "target_to_design_ipsae" in metrics:
+            metrics["design_ipsae_max"] = max(
+                metrics["design_to_target_ipsae"],
+                metrics["target_to_design_ipsae"],
+            )
 
         # Write outputs to files and return sample_id for conformation of successful processing
         data = {

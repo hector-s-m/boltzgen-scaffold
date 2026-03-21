@@ -103,6 +103,11 @@ def get_best_folding_sample(folded):
         k: folded[k][best_idx] for k in const.eval_keys_confidence if k in folded
     }
     best_sample["coords"] = folded["coords"][best_idx]
+    # Include per-token pLDDT and PAE matrix for pDockQ/pDockQ2/LIS computation
+    if "plddt" in folded:
+        best_sample["plddt"] = folded["plddt"][best_idx]
+    if "pae" in folded:
+        best_sample["pae"] = folded["pae"][best_idx]
     return best_sample
 
 
@@ -1258,3 +1263,139 @@ def compute_liability_metrics(sequence, liability_modality, liability_peptide_ty
         "; ".join(violation_summary) if violation_summary else ""
     )
     return metrics
+
+
+# ---------------------------------------------------------------------------
+# pDockQ, pDockQ2, LIS  (adapted from DunbrackLab/IPSAE for Boltz2)
+# ---------------------------------------------------------------------------
+
+import math
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class InterfaceData:
+    """Precomputed interface data shared across pDockQ/pDockQ2/LIS."""
+    best_sample: dict
+    token_coords: np.ndarray
+    design_idx: np.ndarray
+    target_idx: np.ndarray
+    plddt_token: Optional[np.ndarray]
+    pae_matrix: Optional[np.ndarray]
+    n_tokens: int
+
+
+def _prepare_interface_data(folded, feat, cutoff=8.0):
+    """Precompute token coordinates, masks, and interface pairs.
+
+    Called once and shared across pDockQ/pDockQ2/LIS to avoid redundant
+    matrix multiplications and mask computations.
+    """
+    best = get_best_folding_sample(folded)
+    coords = best["coords"]
+
+    # Token-level representative coords via atom_to_token centroid
+    atom_to_token = feat["atom_to_token"].numpy()  # (A, T)
+    token_coords = atom_to_token.T @ coords  # (T, 3)
+    n_atoms_per_token = np.clip(atom_to_token.sum(0, keepdims=True).T, 1, None)
+    token_coords = token_coords / n_atoms_per_token
+
+    # Design/target masks
+    design_mask = feat.get("chain_design_mask", feat.get("design_mask"))
+    if isinstance(design_mask, torch.Tensor):
+        design_mask = design_mask.numpy()
+    design_mask = design_mask.astype(bool)
+    pad_mask = feat["token_pad_mask"].numpy().astype(bool)
+    target_mask = ~design_mask & pad_mask
+
+    # Interface residue pairs
+    d_idx = np.where(design_mask)[0]
+    t_idx = np.where(target_mask)[0]
+    if len(d_idx) == 0 or len(t_idx) == 0:
+        design_idx = np.array([], dtype=int)
+        target_idx = np.array([], dtype=int)
+    else:
+        diff = token_coords[d_idx, None, :] - token_coords[None, t_idx, :]
+        dists = np.sqrt((diff ** 2).sum(-1))
+        pairs = np.argwhere(dists <= cutoff)
+        design_idx = d_idx[pairs[:, 0]]
+        target_idx = t_idx[pairs[:, 1]]
+
+    return InterfaceData(
+        best_sample=best,
+        token_coords=token_coords,
+        design_idx=design_idx,
+        target_idx=target_idx,
+        plddt_token=best.get("plddt", None),
+        pae_matrix=best.get("pae", None),
+        n_tokens=int(pad_mask.sum()),
+    )
+
+
+def compute_pdockq(folded, feat, cutoff=8.0, _cache=None):
+    """Compute pDockQ (Bryant et al. 2022) from Boltz2 folding output.
+
+    pDockQ = 0.724 / (1 + exp(-0.052 * (x - 152.611))) + 0.018
+    where  x = <pLDDT>_interface * log10(N_contacts)
+    """
+    idata = _cache or _prepare_interface_data(folded, feat, cutoff)
+    if idata.plddt_token is None:
+        return float("nan")
+    if len(idata.design_idx) < 1:
+        return 0.0
+
+    if_residues = np.unique(np.concatenate([idata.design_idx, idata.target_idx]))
+    avg_plddt = float(idata.plddt_token.squeeze()[if_residues].mean()) * 100
+
+    x = avg_plddt * math.log10(len(idata.design_idx))
+    return 0.724 / (1 + math.exp(-0.052 * (x - 152.611))) + 0.018
+
+
+def compute_pdockq2(folded, feat, cutoff=8.0, _cache=None):
+    """Compute pDockQ2 (Zhu et al. 2023) from Boltz2 folding output.
+
+    pDockQ2 = 1.31 / (1 + exp(-0.075 * (x - 84.733))) + 0.005
+    where  x = <pLDDT>_interface * <PTM_from_PAE>_interface
+    """
+    idata = _cache or _prepare_interface_data(folded, feat, cutoff)
+    if idata.plddt_token is None or idata.pae_matrix is None:
+        return float("nan")
+    if len(idata.design_idx) < 1:
+        return 0.0
+
+    if_residues = np.unique(np.concatenate([idata.design_idx, idata.target_idx]))
+    avg_plddt = float(idata.plddt_token.squeeze()[if_residues].mean()) * 100
+
+    # PAE → PTM-like score per interface pair
+    pae_sq = idata.pae_matrix.squeeze()
+    d0 = max(1.24 * (max(idata.n_tokens, 19) - 15) ** (1.0 / 3.0) - 1.8, 1.0)
+    pae_if = pae_sq[idata.design_idx, idata.target_idx]
+    mean_ptm = float((1.0 / (1.0 + (pae_if / d0) ** 2)).mean())
+
+    x = avg_plddt * mean_ptm
+    return 1.31 / (1 + math.exp(-0.075 * (x - 84.733))) + 0.005
+
+
+def compute_lis(folded, feat, pae_threshold=12.0, cutoff=8.0, _cache=None):
+    """Compute LIS – Local Interaction Score (Kim et al. 2024).
+
+    For interface residue pairs with PAE < threshold:
+        score = mean((threshold - pae) / threshold)
+    """
+    idata = _cache or _prepare_interface_data(folded, feat, cutoff)
+    if idata.pae_matrix is None:
+        return float("nan")
+    if len(idata.design_idx) < 1:
+        return 0.0
+
+    pae_sq = idata.pae_matrix.squeeze()
+    # Collect both directions
+    pae_vals = np.concatenate([
+        pae_sq[idata.design_idx, idata.target_idx],
+        pae_sq[idata.target_idx, idata.design_idx],
+    ])
+    valid = pae_vals[pae_vals < pae_threshold]
+    if len(valid) == 0:
+        return 0.0
+    return float(((pae_threshold - valid) / pae_threshold).mean())

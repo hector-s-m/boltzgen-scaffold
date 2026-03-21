@@ -3503,6 +3503,8 @@ eval_keys = (
         "atom_to_token",
         "mol_type",
         "backbone_mask",
+        "plddt",  # per-token pLDDT (needed for pDockQ)
+        "pae",  # NxN expected PAE matrix (needed for pDockQ2/LIS)
     ]
 )
 

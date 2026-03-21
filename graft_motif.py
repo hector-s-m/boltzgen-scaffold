@@ -24,6 +24,13 @@ from pathlib import Path
 
 import yaml
 
+# Natural CDR length ranges for nanobodies (approximate, IMGT-like)
+DEFAULT_CDR_LENGTHS = {
+    1: "5..13",
+    2: "3..10",
+    3: "10..25",
+}
+
 
 def parse_res_ranges(range_str):
     """Parse a comma-separated residue range string into list of (start, end) tuples.
@@ -62,6 +69,17 @@ def format_range(start, end):
 def format_ranges(ranges):
     """Format a list of (start, end) tuples as a comma-separated range string."""
     return ",".join(format_range(s, e) for s, e in ranges)
+
+
+def parse_length_spec(spec):
+    """Parse a CDR length specification like '5..13' or '10' into (min, max)."""
+    spec = str(spec).strip()
+    if ".." in spec:
+        parts = spec.split("..")
+        return int(parts[0]), int(parts[1])
+    else:
+        n = int(spec)
+        return n, n
 
 
 def parse_scaffold_yaml(scaffold_path):
@@ -179,6 +197,52 @@ def make_relative(path, relative_to):
         return str(path)
 
 
+def build_cdr_design(chain_id, cdr_range, scaffold_excludes, scaffold_insertion, cdr_length_override):
+    """Build exclude/insertion entries for a single non-graft CDR.
+
+    If cdr_length_override is given (e.g. '5..13'), the entire CDR is excluded
+    and replaced with the specified number of designed residues.
+    Otherwise, uses the scaffold's own exclude/insertion settings.
+    """
+    cdr_start, cdr_end = cdr_range
+
+    if cdr_length_override is not None:
+        # Override: exclude all scaffold CDR residues, insert desired length
+        min_len, max_len = parse_length_spec(cdr_length_override)
+        exclude_entries = [
+            {"chain": {"id": chain_id, "res_index": format_range(cdr_start, cdr_end)}}
+        ]
+        insertion_entries = [
+            {
+                "insertion": {
+                    "id": chain_id,
+                    "res_index": cdr_start,
+                    "num_residues": f"{min_len}..{max_len}" if min_len != max_len else min_len,
+                }
+            }
+        ]
+        return exclude_entries, insertion_entries
+
+    # Use scaffold defaults
+    exclude_entries = []
+    for exc in scaffold_excludes:
+        exclude_entries.append(
+            {"chain": {"id": chain_id, "res_index": format_ranges([exc])}}
+        )
+    insertion_entries = []
+    if scaffold_insertion is not None:
+        insertion_entries.append(
+            {
+                "insertion": {
+                    "id": scaffold_insertion["id"],
+                    "res_index": scaffold_insertion["res_index"],
+                    "num_residues": scaffold_insertion["num_residues"],
+                }
+            }
+        )
+    return exclude_entries, insertion_entries
+
+
 def generate_graft_yaml(
     input_pdb,
     target_chain,
@@ -188,6 +252,7 @@ def generate_graft_yaml(
     cdr_target=3,
     flank_n="2..5",
     flank_c="2..5",
+    cdr_lengths=None,
 ):
     """Generate a BoltzGen design YAML for motif grafting.
 
@@ -202,10 +267,27 @@ def generate_graft_yaml(
     nanobody's position. The framework has visibility 2 (internal structure known,
     global position determined by the model). All non-motif CDR residues are
     designed freely to develop complementarity against the target.
+
+    Parameters
+    ----------
+    cdr_lengths : dict, optional
+        Override CDR lengths for non-graft CDRs. Keys are CDR numbers (1, 2, 3),
+        values are length specs like '5..13' or '10'. If None, uses natural defaults.
     """
+    if cdr_lengths is None:
+        cdr_lengths = {}
+
     cdr_idx = cdr_target - 1
     cdr_start, cdr_end = scaffold_info["cdrs"][cdr_idx]
     chain_id = scaffold_info["chain_id"]
+
+    # Check for chain ID collision between scaffold and target/motif
+    if chain_id == target_chain:
+        print(
+            f"Warning: scaffold chain '{chain_id}' collides with target chain '{target_chain}'. "
+            f"BoltzGen will auto-rename, but verify the output with 'boltzgen check'.",
+            file=sys.stderr,
+        )
 
     # Resolve paths relative to output directory
     input_rel = make_relative(Path(input_pdb).resolve(), output_dir)
@@ -229,22 +311,16 @@ def generate_graft_yaml(
     pre_insertions = []
     pre_vis0_ranges = list(pre_design_ranges)
 
-    for orig_idx, _ in pre_cdrs:
-        for exc in scaffold_info["excludes"][orig_idx]:
-            pre_exclude_entries.append(
-                {"chain": {"id": chain_id, "res_index": format_ranges([exc])}}
-            )
-        if orig_idx < len(scaffold_info["insertions"]):
-            ins = scaffold_info["insertions"][orig_idx]
-            pre_insertions.append(
-                {
-                    "insertion": {
-                        "id": ins["id"],
-                        "res_index": ins["res_index"],
-                        "num_residues": ins["num_residues"],
-                    }
-                }
-            )
+    for orig_idx, cdr_range in pre_cdrs:
+        cdr_num = orig_idx + 1
+        length_override = cdr_lengths.get(cdr_num, DEFAULT_CDR_LENGTHS[cdr_num])
+        scaffold_ins = scaffold_info["insertions"][orig_idx] if orig_idx < len(scaffold_info["insertions"]) else None
+        excl, ins = build_cdr_design(
+            chain_id, cdr_range, scaffold_info["excludes"][orig_idx],
+            scaffold_ins, length_override,
+        )
+        pre_exclude_entries.extend(excl)
+        pre_insertions.extend(ins)
 
     # Include extra visibility 0 ranges that fall before the graft CDR
     for vr in scaffold_info["extra_vis0"]:
@@ -290,12 +366,18 @@ def generate_graft_yaml(
     # --- Entity 3: N-terminal CDR flank (designed) ---
     n_flank = {"protein": {"id": "NF", "fuse": chain_id, "sequence": flank_n}}
 
-    # --- Entity 4: Grafted motif (fixed structure) ---
+    # --- Entity 4: Grafted motif (fixed structure, visibility 1) ---
+    # The motif is explicitly marked as not_design to ensure its sequence is
+    # preserved during inverse folding and never redesigned.
     motif_entity = {
         "file": {
             "path": input_rel,
             "fuse": chain_id,
             "include": [{"chain": {"id": motif_chain}}],
+            "not_design": [{"chain": {"id": motif_chain}}],
+            "structure_groups": [
+                {"group": {"id": motif_chain, "visibility": 1}},
+            ],
         }
     }
 
@@ -308,22 +390,16 @@ def generate_graft_yaml(
     post_insertions = []
     post_vis0_ranges = list(post_design_ranges)
 
-    for orig_idx, _ in post_cdrs:
-        for exc in scaffold_info["excludes"][orig_idx]:
-            post_exclude_entries.append(
-                {"chain": {"id": chain_id, "res_index": format_ranges([exc])}}
-            )
-        if orig_idx < len(scaffold_info["insertions"]):
-            ins = scaffold_info["insertions"][orig_idx]
-            post_insertions.append(
-                {
-                    "insertion": {
-                        "id": ins["id"],
-                        "res_index": ins["res_index"],
-                        "num_residues": ins["num_residues"],
-                    }
-                }
-            )
+    for orig_idx, cdr_range in post_cdrs:
+        cdr_num = orig_idx + 1
+        length_override = cdr_lengths.get(cdr_num, DEFAULT_CDR_LENGTHS[cdr_num])
+        scaffold_ins = scaffold_info["insertions"][orig_idx] if orig_idx < len(scaffold_info["insertions"]) else None
+        excl, ins = build_cdr_design(
+            chain_id, cdr_range, scaffold_info["excludes"][orig_idx],
+            scaffold_ins, length_override,
+        )
+        post_exclude_entries.extend(excl)
+        post_insertions.extend(ins)
 
     for vr in scaffold_info["extra_vis0"]:
         if vr[0] > cdr_end:
@@ -401,6 +477,13 @@ Example:
         --scaffold example/nanobody_scaffolds/7eow.yaml \\
         --output designs/my_graft.yaml
 
+    # Tune CDR lengths:
+    python graft_motif.py \\
+        --input complex.pdb \\
+        --scaffold example/nanobody_scaffolds/7eow.yaml \\
+        --output designs/my_graft.yaml \\
+        --cdr1-length 6..10 --cdr2-length 4..8
+
     # Then run:
     boltzgen run designs/my_graft.yaml --protocol nanobody-anything --output results/
 """,
@@ -449,6 +532,21 @@ Example:
         help="C-terminal flank length range (default: 2..5)",
     )
     parser.add_argument(
+        "--cdr1-length",
+        default=None,
+        help=f"CDR1 length range, e.g. '6..10' (default: {DEFAULT_CDR_LENGTHS[1]})",
+    )
+    parser.add_argument(
+        "--cdr2-length",
+        default=None,
+        help=f"CDR2 length range, e.g. '4..8' (default: {DEFAULT_CDR_LENGTHS[2]})",
+    )
+    parser.add_argument(
+        "--cdr3-length",
+        default=None,
+        help=f"CDR3 length range, e.g. '8..20' (default: {DEFAULT_CDR_LENGTHS[3]})",
+    )
+    parser.add_argument(
         "--list-scaffolds",
         action="store_true",
         help="List available nanobody scaffolds and exit",
@@ -479,6 +577,21 @@ Example:
             file=sys.stderr,
         )
 
+    # Build CDR length overrides (only for non-graft CDRs)
+    cdr_lengths = {}
+    cdr_length_args = {1: args.cdr1_length, 2: args.cdr2_length, 3: args.cdr3_length}
+    for cdr_num, length_spec in cdr_length_args.items():
+        if cdr_num == args.cdr:
+            if length_spec is not None:
+                print(
+                    f"Warning: --cdr{cdr_num}-length is ignored because CDR{cdr_num} "
+                    f"is the graft target (replaced by motif + flanks)",
+                    file=sys.stderr,
+                )
+            continue
+        if length_spec is not None:
+            cdr_lengths[cdr_num] = length_spec
+
     # Parse scaffold(s)
     scaffold_infos = []
     for scaffold_path in args.scaffold:
@@ -499,6 +612,7 @@ Example:
             cdr_target=args.cdr,
             flank_n=args.flank_n,
             flank_c=args.flank_c,
+            cdr_lengths=cdr_lengths,
         )
         with open(output_path, "w") as f:
             yaml.dump(design, f, default_flow_style=False, sort_keys=False)
@@ -519,6 +633,7 @@ Example:
                 cdr_target=args.cdr,
                 flank_n=args.flank_n,
                 flank_c=args.flank_c,
+                cdr_lengths=cdr_lengths,
             )
             with open(out_file, "w") as f:
                 yaml.dump(design, f, default_flow_style=False, sort_keys=False)

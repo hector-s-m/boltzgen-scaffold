@@ -189,6 +189,7 @@ class Filter(Task):
         self.modality = modality
         self.peptide_type = peptide_type
         self.size_buckets = size_buckets
+        self.refolding_rmsd_threshold = refolding_rmsd_threshold
 
         if outdir is None:
             outdir = design_dir
@@ -385,6 +386,17 @@ class Filter(Task):
         df["neg_filter_rmsd_design"] = -df["filter_rmsd_design"]
         df["has_x"] = df["designed_sequence"].str.contains("X")
         self.df = df
+
+        # Add motif RMSD filter if grafting metrics are present
+        if "fixed_residues_bb_rmsd_refolded" in df.columns:
+            if not any(f["feature"] == "fixed_residues_bb_rmsd_refolded" for f in self.filters):
+                self.filters.append(
+                    {
+                        "feature": "fixed_residues_bb_rmsd_refolded",
+                        "lower_is_better": True,
+                        "threshold": self.refolding_rmsd_threshold,
+                    },
+                )
 
         print(f"Total number of designs: {len(self.df):>5}")
         before = len(self.df)
@@ -592,6 +604,47 @@ class Filter(Task):
         print("Files + CSV saved to", self.outdir)
 
         self.df.to_csv(self.outdir / f"all_designs_metrics.csv", index=False)
+
+        # Write condensed design registry with key metrics
+        self._write_design_registry()
+
+    def _write_design_registry(self):
+        """Write a condensed ``design_registry.csv`` with the most important
+        quality metrics for quick inspection and downstream analysis."""
+        registry_columns = {
+            # Identity
+            "id": "id",
+            "file_name": "file_name",
+            # Confidence
+            "complex_plddt": "pLDDT",
+            "complex_iplddt": "ipLDDT",
+            "design_to_target_iptm": "ipTM",
+            "min_design_to_target_pae": "iPAE",
+            "design_ipsae_min": "ipSAE_min",
+            "design_ipsae_max": "ipSAE_max",
+            "design_to_target_ipsae": "ipSAE",
+            # Structural quality
+            "filter_rmsd": "RMSD",
+            "rmsd_target": "target_RMSD",
+            # Docking quality
+            "pdockq": "pDockQ",
+            "pdockq2": "pDockQ2",
+            "lis": "LIS",
+            # Motif grafting quality
+            "fixed_residues_bb_rmsd_refolded": "motif_RMSD",
+        }
+        # Only include columns that actually exist in the dataframe
+        available = {
+            src: dst for src, dst in registry_columns.items() if src in self.df.columns
+        }
+        if not available:
+            return
+
+        registry = self.df[list(available.keys())].copy()
+        registry.columns = list(available.values())
+        registry_path = self.outdir / "design_registry.csv"
+        registry.to_csv(registry_path, float_format="%.4f", index=False)
+        print(f"Condensed design registry saved to {registry_path}")
 
     def optimize_diversity(self):
         # Load structures and sequences to compute similarities
