@@ -290,23 +290,11 @@ class PredictionDataset(torch.utils.data.Dataset):
         # set chain_design_mask
         features["chain_design_mask"] = torch.from_numpy(chain_design_mask)
 
-        # Apply motif noise: add Gaussian noise to template coordinates of
-        # fixed residues on the design chain (motif/framework with visibility>0).
-        # This softens the structural prior, allowing the diffusion model some
-        # flexibility in positioning the motif for better designability.
-        if motif_noise_sigma > 0:
-            structure_group = features.get("structure_group", None)
-            design_mask = features.get("design_mask", None)
-            if structure_group is not None and design_mask is not None:
-                # Motif tokens: on the design chain, not designed, with structure
-                motif_mask = (
-                    torch.from_numpy(chain_design_mask).bool()
-                    & ~design_mask.bool()
-                    & (structure_group > 0)
-                )
-                if motif_mask.any():
-                    noise = torch.randn_like(features["center_coords"]) * motif_noise_sigma
-                    features["center_coords"][motif_mask] += noise[motif_mask]
+        # Pass motif_noise_sigma to diffusion for side-chain inpainting perturbation.
+        # The noise is applied to all fixed (non-designed) atom coordinates during
+        # diffusion inpainting, giving side chains soft flexibility while keeping
+        # backbone anchored by the template distogram (center_coords stay clean).
+        features["motif_noise_sigma"] = torch.tensor(motif_noise_sigma)
 
         # Compute template features
         templates_features = load_dummy_templates(

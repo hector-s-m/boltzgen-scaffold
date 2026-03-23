@@ -559,6 +559,10 @@ class AtomDiffusion(Module):
         # replace predicted coords with appropriately noised input coords at
         # each step.  This preserves side-chain conformations of fixed residues
         # (e.g. grafted motif) while allowing the model to predict designed regions.
+        #
+        # motif_noise_sigma (from feats) adds a fixed Gaussian perturbation to
+        # the input coordinates, giving side chains soft flexibility while
+        # keeping them near their original conformation.
         inpaint_mask = None
         input_coords = None
         if "design_mask" in feats and "coords" in feats:
@@ -572,6 +576,20 @@ class AtomDiffusion(Module):
             inpaint_mask = ((1 - atom_design_mask) * atom_resolved).bool()
             inpaint_mask = inpaint_mask.repeat_interleave(multiplicity, 0)
             input_coords = feats["coords"].repeat_interleave(multiplicity, 0)
+
+            # Apply motif noise to side-chain atoms only: a fixed Gaussian
+            # perturbation so side chains have soft flexibility while backbone
+            # atoms stay rigidly anchored by the template distogram.
+            motif_noise_sigma = feats.get("motif_noise_sigma", 0.0)
+            if isinstance(motif_noise_sigma, torch.Tensor):
+                motif_noise_sigma = motif_noise_sigma.item()
+            if motif_noise_sigma > 0:
+                backbone_mask = feats["backbone_mask"].bool()
+                backbone_mask = backbone_mask.repeat_interleave(multiplicity, 0)
+                # Only perturb non-backbone (side chain) atoms within inpaint region
+                sidechain_inpaint = inpaint_mask & ~backbone_mask
+                motif_perturbation = motif_noise_sigma * torch.randn_like(input_coords)
+                input_coords = input_coords + motif_perturbation * sidechain_inpaint.unsqueeze(-1)
 
         # gradually denoise
         coords_traj = [atom_coords]
