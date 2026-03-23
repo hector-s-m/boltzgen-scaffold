@@ -504,16 +504,29 @@ def generate_graft_yaml(
             f"({total_hotspot_res} hotspot residues, linkers: {linker_length})",
             file=sys.stderr,
         )
+        # Count total residues per motif chain to detect whole-chain fragments
+        chain_res_counts = {}
+        for mc, frag in all_fragments:
+            chain_res_counts.setdefault(mc, 0)
+            chain_res_counts[mc] += len(frag)
+
         for i, (mc, fragment) in enumerate(all_fragments):
             # Fragment entity: anchored, not designed
-            res_index = format_range(fragment[0], fragment[-1])
+            # If the fragment spans the entire chain, include the whole chain
+            # (BoltzGen's res_index uses 1-indexed positions within the chain,
+            # not PDB residue numbers, so large PDB numbers would be out of bounds)
+            chain_frags_for_mc = [f for c, f in all_fragments if c == mc]
+            is_whole_chain = len(chain_frags_for_mc) == 1
+            if is_whole_chain:
+                include_entry = {"chain": {"id": mc}}
+            else:
+                res_index = format_range(fragment[0], fragment[-1])
+                include_entry = {"chain": {"id": mc, "res_index": res_index}}
             frag_entity = {
                 "file": {
                     "path": input_rel,
                     "fuse": chain_id,
-                    "include": [
-                        {"chain": {"id": mc, "res_index": res_index}}
-                    ],
+                    "include": [include_entry],
                     "not_design": [{"chain": {"id": mc}}],
                     "structure_groups": [
                         {"group": {"id": mc, "visibility": 1}},
