@@ -20,7 +20,7 @@ FLANK_N="2..9"
 FLANK_C="2..9"
 LINKER_LENGTH="1..6"
 MOTIF_NOISE=0.2
-NUM_DESIGNS=250                              # Per config (6 configs × 250 = 1500 total)
+NUM_DESIGNS=1000                              # Per config (6 configs × 250 = 1500 total)
 PROTOCOL="nanobody-anything"
 
 # =============================================================================
