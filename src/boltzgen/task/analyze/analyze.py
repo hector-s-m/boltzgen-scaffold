@@ -1178,6 +1178,42 @@ class Analyze(Task):
                         orig_bb_fixed, refold_bb_fixed
                     ).item()
 
+            # Compute per-CDR backbone RMSD between generated and refolded structures.
+            # CDR loops are identified as contiguous blocks of designed residues on
+            # the design chain.  Numbered in order of appearance (CDR1, CDR2, CDR3).
+            designed_on_chain = (
+                chain_design_mask
+                & design_mask
+                & feat["token_pad_mask"].bool()
+            )
+            if designed_on_chain.sum() > 0:
+                designed_indices = torch.where(designed_on_chain)[0]
+                # Split into contiguous blocks
+                cdr_blocks = []
+                current_block = [designed_indices[0].item()]
+                for idx in designed_indices[1:]:
+                    if idx.item() == current_block[-1] + 1:
+                        current_block.append(idx.item())
+                    else:
+                        cdr_blocks.append(current_block)
+                        current_block = [idx.item()]
+                cdr_blocks.append(current_block)
+
+                for cdr_num, block in enumerate(cdr_blocks, 1):
+                    block_mask = torch.zeros_like(design_mask)
+                    block_mask[block] = True
+                    atom_block_mask = (
+                        (feat["atom_to_token"].float() @ block_mask.unsqueeze(-1).float())
+                        .bool().squeeze()
+                    )
+                    bb_block = atom_block_mask & feat["backbone_mask"].bool() & feat["atom_resolved_mask"].bool()
+                    orig_bb = feat["coords"][0][bb_block][None, ...]
+                    refold_bb = feat_out["coords"][bb_block][None, ...]
+                    if orig_bb.shape[1] > 0 and orig_bb.shape == refold_bb.shape:
+                        metrics[f"cdr{cdr_num}_bb_rmsd_refolded"] = compute_rmsd(
+                            orig_bb, refold_bb
+                        ).item()
+
         # Affinity metrics
         if self.affinity_metrics:
             affinity_path = (

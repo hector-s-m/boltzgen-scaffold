@@ -73,6 +73,9 @@ echo ""
 #  STEP 2: Run BoltzGen on each generated design
 # =============================================================================
 
+COMBINED_REGISTRY="$RESULTS_DIR/design_registry_all.csv"
+rm -f "$COMBINED_REGISTRY"
+
 echo "--- Step 2: Running BoltzGen pipeline ---"
 for yaml in "$DESIGNS_DIR"/graft_*.yaml; do
     [[ -f "$yaml" ]] || continue
@@ -83,9 +86,21 @@ for yaml in "$DESIGNS_DIR"/graft_*.yaml; do
         --protocol "$PROTOCOL" \
         --output "$RESULTS_DIR/$name" \
         --num_designs "$NUM_DESIGNS"
+
+    # Append this scaffold's registry to the combined file
+    registry="$RESULTS_DIR/$name/final_ranked_designs/design_registry.csv"
+    if [[ -f "$registry" ]]; then
+        if [[ ! -f "$COMBINED_REGISTRY" ]]; then
+            # First scaffold: include header + add scaffold column
+            head -1 "$registry" | sed 's/$/,scaffold/' > "$COMBINED_REGISTRY"
+        fi
+        tail -n +2 "$registry" | sed "s/$/,$name/" >> "$COMBINED_REGISTRY"
+        echo "  -> Registry updated: $(tail -n +2 "$COMBINED_REGISTRY" | wc -l | tr -d ' ') total designs in $COMBINED_REGISTRY"
+    fi
 done
 
 echo ""
 echo "================================================"
 echo "  All done. Results in $RESULTS_DIR/"
+echo "  Combined registry: $COMBINED_REGISTRY"
 echo "================================================"

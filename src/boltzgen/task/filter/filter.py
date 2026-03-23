@@ -625,7 +625,12 @@ class Filter(Task):
             "design_to_target_ipsae": "ipSAE",
             # Structural quality
             "filter_rmsd": "RMSD",
+            "filter_rmsd_design": "CDR_RMSD",
             "rmsd_target": "target_RMSD",
+            # Per-CDR RMSD (computed in analysis if CDR boundaries are available)
+            "cdr1_bb_rmsd_refolded": "CDR1_RMSD",
+            "cdr2_bb_rmsd_refolded": "CDR2_RMSD",
+            "cdr3_bb_rmsd_refolded": "CDR3_RMSD",
             # Docking quality
             "pdockq": "pDockQ",
             "pdockq2": "pDockQ2",
