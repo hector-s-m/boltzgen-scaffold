@@ -555,6 +555,24 @@ class AtomDiffusion(Module):
         atom_coords = init_sigma * torch.randn(shape, device=self.device)
         feats = network_condition_kwargs["feats"]
 
+        # Inpainting setup: for non-designed atoms with resolved coordinates,
+        # replace predicted coords with appropriately noised input coords at
+        # each step.  This preserves side-chain conformations of fixed residues
+        # (e.g. grafted motif) while allowing the model to predict designed regions.
+        inpaint_mask = None
+        input_coords = None
+        if "design_mask" in feats and "coords" in feats:
+            design_mask_token = feats["design_mask"]  # (B, N_tokens)
+            atom_design_mask = torch.bmm(
+                feats["atom_to_token"].float(),
+                design_mask_token.float().unsqueeze(-1),
+            ).squeeze(-1)  # (B, N_atoms)
+            atom_resolved = feats["atom_resolved_mask"].float()
+            # inpaint_mask: True for non-designed, resolved atoms
+            inpaint_mask = ((1 - atom_design_mask) * atom_resolved).bool()
+            inpaint_mask = inpaint_mask.repeat_interleave(multiplicity, 0)
+            input_coords = feats["coords"].repeat_interleave(multiplicity, 0)
+
         # gradually denoise
         coords_traj = [atom_coords]
         x0_coords_traj = []
@@ -614,6 +632,16 @@ class AtomDiffusion(Module):
             atom_coords_next = (
                 atom_coords_noisy + step_scale * (sigma_t - t_hat) * denoised_over_sigma
             )
+
+            # Inpainting: replace non-designed atoms with noised input coords
+            # at the current noise level, so the model sees consistent noise
+            # but fixed residues (including side chains) stay anchored.
+            if inpaint_mask is not None and input_coords is not None:
+                inpaint_noise = sigma_t * torch.randn_like(input_coords)
+                noised_input = input_coords + inpaint_noise
+                atom_coords_next = torch.where(
+                    inpaint_mask.unsqueeze(-1), noised_input, atom_coords_next
+                )
 
             coords_traj.append(atom_coords_next)
             x0_coords_traj.append(atom_coords_denoised)

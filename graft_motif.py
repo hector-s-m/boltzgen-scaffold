@@ -161,7 +161,20 @@ def parse_scaffold_yaml(scaffold_path):
 
 
 def detect_chains(pdb_path):
-    """Auto-detect target and motif chains. Larger chain = target, smaller = motif."""
+    """Auto-detect target and motif chains.
+
+    The largest chain is treated as the target. ALL remaining chains are
+    treated as motif/hotspot chains (supports multi-chain disconnected motifs
+    where each residue may be on its own chain, e.g. PHE on chain B, TYR on
+    chain C).
+
+    Returns
+    -------
+    target : str
+        Chain ID of the target.
+    motif_chains : list[str]
+        Chain IDs of all motif chains (one or more).
+    """
     chains = {}
     with open(pdb_path) as f:
         for line in f:
@@ -185,8 +198,8 @@ def detect_chains(pdb_path):
 
     chains.sort(key=lambda x: x[1], reverse=True)
     target = chains[0][0]
-    motif = chains[1][0]
-    return target, motif
+    motif_chains = [cid for cid, _ in chains[1:]]
+    return target, motif_chains
 
 
 def detect_fragments(pdb_path, chain_id, bond_cutoff=2.0):
@@ -318,7 +331,7 @@ def build_cdr_design(chain_id, cdr_range, scaffold_excludes, scaffold_insertion,
 def generate_graft_yaml(
     input_pdb,
     target_chain,
-    motif_chain,
+    motif_chains,
     scaffold_info,
     output_dir,
     cdr_target=3,
@@ -343,12 +356,15 @@ def generate_graft_yaml(
     global position determined by the model). All non-motif CDR residues are
     designed freely to develop complementarity against the target.
 
-    If the motif chain contains disconnected fragments (no peptide bond between
-    consecutive residues), the script automatically switches to **hotspot mode**:
-    each fragment is anchored independently and designed linkers connect them.
+    Motif residues can span multiple chains (e.g. PHE on chain B, TYR on chain C).
+    Each chain is treated as a separate fragment connected by designed linkers.
+    Within a single chain, disconnected fragments (no peptide bond) are also
+    detected and linked automatically.
 
     Parameters
     ----------
+    motif_chains : list[str]
+        One or more chain IDs containing motif/hotspot residues.
     cdr_lengths : dict, optional
         Override CDR lengths for non-graft CDRs. Keys are CDR numbers (1, 2, 3),
         values are length specs like '5..13' or '10'. If None, uses natural defaults.
@@ -449,39 +465,46 @@ def generate_graft_yaml(
     n_flank = {"protein": {"id": "NF", "fuse": chain_id, "sequence": flank_n}}
 
     # --- Entity 4: Grafted motif / hotspot fragments ---
-    # Detect whether motif is contiguous or disconnected
-    fragments = detect_fragments(input_pdb, motif_chain)
-    if len(fragments) <= 1:
-        # Contiguous motif: single entity (original behavior)
-        # The motif is explicitly marked as not_design to ensure its sequence is
-        # preserved during inverse folding and never redesigned.
+    # Collect all fragments across all motif chains.  Each chain may contain
+    # one or more contiguous fragments; residues on different chains are always
+    # separate fragments.
+    all_fragments = []  # list of (chain_id, [res_nums])
+    for mc in motif_chains:
+        chain_frags = detect_fragments(input_pdb, mc)
+        for frag in chain_frags:
+            all_fragments.append((mc, frag))
+
+    if len(all_fragments) == 1:
+        # Single contiguous motif on one chain
+        mc, frag = all_fragments[0]
         motif_entities = [
             {
                 "file": {
                     "path": input_rel,
                     "fuse": chain_id,
-                    "include": [{"chain": {"id": motif_chain}}],
-                    "not_design": [{"chain": {"id": motif_chain}}],
+                    "include": [{"chain": {"id": mc}}],
+                    "not_design": [{"chain": {"id": mc}}],
                     "structure_groups": [
-                        {"group": {"id": motif_chain, "visibility": 1}},
+                        {"group": {"id": mc, "visibility": 1}},
                     ],
                 }
             }
         ]
         print(
-            f"  Motif: contiguous ({len(fragments[0]) if fragments else 0} residues)",
+            f"  Motif: contiguous ({len(frag)} residues on chain {mc})",
             file=sys.stderr,
         )
     else:
         # Hotspot mode: alternating fragment + designed linker entities
         motif_entities = []
-        total_hotspot_res = sum(len(f) for f in fragments)
+        total_hotspot_res = sum(len(f) for _, f in all_fragments)
         print(
-            f"  Motif: {len(fragments)} disconnected fragments "
+            f"  Motif: {len(all_fragments)} disconnected fragments across "
+            f"chain(s) {','.join(motif_chains)} "
             f"({total_hotspot_res} hotspot residues, linkers: {linker_length})",
             file=sys.stderr,
         )
-        for i, fragment in enumerate(fragments):
+        for i, (mc, fragment) in enumerate(all_fragments):
             # Fragment entity: anchored, not designed
             res_index = format_range(fragment[0], fragment[-1])
             frag_entity = {
@@ -489,18 +512,18 @@ def generate_graft_yaml(
                     "path": input_rel,
                     "fuse": chain_id,
                     "include": [
-                        {"chain": {"id": motif_chain, "res_index": res_index}}
+                        {"chain": {"id": mc, "res_index": res_index}}
                     ],
-                    "not_design": [{"chain": {"id": motif_chain}}],
+                    "not_design": [{"chain": {"id": mc}}],
                     "structure_groups": [
-                        {"group": {"id": motif_chain, "visibility": 1}},
+                        {"group": {"id": mc, "visibility": 1}},
                     ],
                 }
             }
             motif_entities.append(frag_entity)
 
             # Designed linker between fragments (not after last)
-            if i < len(fragments) - 1:
+            if i < len(all_fragments) - 1:
                 linker_id = f"LK{i + 1}"
                 linker_entity = {
                     "protein": {
@@ -629,7 +652,8 @@ Example:
     parser.add_argument(
         "--motif-chain",
         default=None,
-        help="Motif chain ID (default: auto-detect as second largest chain)",
+        help="Motif chain ID(s), comma-separated for multi-chain motifs "
+             "(e.g. 'B,C'). Default: auto-detect all non-target chains.",
     )
     parser.add_argument(
         "--scaffold",
@@ -708,13 +732,16 @@ Example:
     # Auto-detect chains if not specified
     if args.target_chain and args.motif_chain:
         target_chain = args.target_chain
-        motif_chain = args.motif_chain
+        motif_chains = [c.strip() for c in args.motif_chain.split(",")]
     else:
-        detected_target, detected_motif = detect_chains(args.input)
+        detected_target, detected_motif_chains = detect_chains(args.input)
         target_chain = args.target_chain or detected_target
-        motif_chain = args.motif_chain or detected_motif
+        if args.motif_chain:
+            motif_chains = [c.strip() for c in args.motif_chain.split(",")]
+        else:
+            motif_chains = detected_motif_chains
         print(
-            f"Auto-detected chains: target={target_chain}, motif={motif_chain}",
+            f"Auto-detected chains: target={target_chain}, motif={','.join(motif_chains)}",
             file=sys.stderr,
         )
 
@@ -747,7 +774,7 @@ Example:
         design = generate_graft_yaml(
             input_pdb=args.input,
             target_chain=target_chain,
-            motif_chain=motif_chain,
+            motif_chains=motif_chains,
             scaffold_info=scaffold_infos[0],
             output_dir=output_path.parent,
             cdr_target=args.cdr,
@@ -770,7 +797,7 @@ Example:
             design = generate_graft_yaml(
                 input_pdb=args.input,
                 target_chain=target_chain,
-                motif_chain=motif_chain,
+                motif_chains=motif_chains,
                 scaffold_info=scaffold_info,
                 output_dir=output_path.parent,
                 cdr_target=args.cdr,

@@ -6,7 +6,7 @@ set -euo pipefail
 # =============================================================================
 
 # --- Input ---
-INPUT_PDB="input/target+motif.pdb"          # PDB with target + motif chains (already docked)
+INPUT_PDB="input/target+motif_2.pdb"        # PDB with target + motif chains (already docked)
 TARGET_CHAIN=""                              # Target chain ID (leave empty to auto-detect as largest chain)
 MOTIF_CHAIN=""                               # Motif chain ID (leave empty to auto-detect as second largest)
 
