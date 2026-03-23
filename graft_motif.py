@@ -328,156 +328,21 @@ def build_cdr_design(chain_id, cdr_range, scaffold_excludes, scaffold_insertion,
     return exclude_entries, insertion_entries
 
 
-def generate_graft_yaml(
-    input_pdb,
-    target_chain,
-    motif_chains,
-    scaffold_info,
-    output_dir,
-    cdr_target=3,
-    flank_n="2..5",
-    flank_c="2..5",
-    cdr_lengths=None,
-    linker_length="1..6",
-    motif_noise=0.0,
-):
-    """Generate a BoltzGen design YAML for motif grafting.
+def _build_motif_entities(input_pdb, input_rel, motif_chains, chain_id, linker_length, cdr_num):
+    """Build motif fragment + linker entities for one graft CDR.
 
-    The generated YAML constructs the nanobody chain by fusing:
-    1. Framework pre-graft CDR (with other CDRs designed normally)
-    2. N-terminal designed flank
-    3. Grafted motif (fixed structure, anchored to target) — or alternating
-       hotspot fragments + designed linkers if the motif is disconnected
-    4. C-terminal designed flank
-    5. Framework post-graft CDR
-
-    The motif has visibility 1 (same coordinate frame as target), anchoring the
-    nanobody's position. The framework has visibility 2 (internal structure known,
-    global position determined by the model). All non-motif CDR residues are
-    designed freely to develop complementarity against the target.
-
-    Motif residues can span multiple chains (e.g. PHE on chain B, TYR on chain C).
-    Each chain is treated as a separate fragment connected by designed linkers.
-    Within a single chain, disconnected fragments (no peptide bond) are also
-    detected and linked automatically.
-
-    Parameters
-    ----------
-    motif_chains : list[str]
-        One or more chain IDs containing motif/hotspot residues.
-    cdr_lengths : dict, optional
-        Override CDR lengths for non-graft CDRs. Keys are CDR numbers (1, 2, 3),
-        values are length specs like '5..13' or '10'. If None, uses natural defaults.
-    linker_length : str
-        Length range for designed linkers between hotspot fragments (default: '1..6').
-        Only used in hotspot mode (disconnected motif).
+    Returns list of entities and a description string for logging.
     """
-    if cdr_lengths is None:
-        cdr_lengths = {}
-
-    cdr_idx = cdr_target - 1
-    cdr_start, cdr_end = scaffold_info["cdrs"][cdr_idx]
-    chain_id = scaffold_info["chain_id"]
-
-    # Check for chain ID collision between scaffold and target/motif
-    if chain_id == target_chain:
-        print(
-            f"Warning: scaffold chain '{chain_id}' collides with target chain '{target_chain}'. "
-            f"BoltzGen will auto-rename, but verify the output with 'boltzgen check'.",
-            file=sys.stderr,
-        )
-
-    # Resolve paths relative to output directory
-    input_rel = make_relative(Path(input_pdb).resolve(), output_dir)
-    scaffold_pdb_rel = make_relative(scaffold_info["pdb_path"], output_dir)
-
-    # Split CDRs into pre-graft and post-graft groups
-    pre_cdrs = [(i, scaffold_info["cdrs"][i]) for i in range(len(scaffold_info["cdrs"])) if i < cdr_idx]
-    post_cdrs = [(i, scaffold_info["cdrs"][i]) for i in range(len(scaffold_info["cdrs"])) if i > cdr_idx]
-
-    # --- Entity 1: Target protein ---
-    target_entity = {
-        "file": {
-            "path": input_rel,
-            "include": [{"chain": {"id": target_chain}}],
-        }
-    }
-
-    # --- Entity 2: Nanobody framework pre-graft CDR ---
-    pre_design_ranges = [cdr for _, cdr in pre_cdrs]
-    pre_exclude_entries = []
-    pre_insertions = []
-    pre_vis0_ranges = list(pre_design_ranges)
-
-    for orig_idx, cdr_range in pre_cdrs:
-        cdr_num = orig_idx + 1
-        length_override = cdr_lengths.get(cdr_num, DEFAULT_CDR_LENGTHS[cdr_num])
-        scaffold_ins = scaffold_info["insertions"][orig_idx] if orig_idx < len(scaffold_info["insertions"]) else None
-        excl, ins = build_cdr_design(
-            chain_id, cdr_range, scaffold_info["excludes"][orig_idx],
-            scaffold_ins, length_override,
-        )
-        pre_exclude_entries.extend(excl)
-        pre_insertions.extend(ins)
-
-    # Include extra visibility 0 ranges that fall before the graft CDR
-    for vr in scaffold_info["extra_vis0"]:
-        if vr[1] < cdr_start:
-            pre_vis0_ranges.append(vr)
-
-    pre_structure_groups = [{"group": {"id": chain_id, "visibility": 2}}]
-    if pre_vis0_ranges:
-        pre_structure_groups.append(
-            {
-                "group": {
-                    "id": chain_id,
-                    "visibility": 0,
-                    "res_index": format_ranges(pre_vis0_ranges),
-                }
-            }
-        )
-
-    pre_framework = {
-        "file": {
-            "path": scaffold_pdb_rel,
-            "include": [
-                {"chain": {"id": chain_id, "res_index": f"..{cdr_start - 1}"}}
-            ],
-            "structure_groups": pre_structure_groups,
-            "reset_res_index": [{"chain": {"id": chain_id}}],
-        }
-    }
-    if pre_design_ranges:
-        pre_framework["file"]["design"] = [
-            {
-                "chain": {
-                    "id": chain_id,
-                    "res_index": format_ranges(pre_design_ranges),
-                }
-            }
-        ]
-    if pre_exclude_entries:
-        pre_framework["file"]["exclude"] = pre_exclude_entries
-    if pre_insertions:
-        pre_framework["file"]["design_insertions"] = pre_insertions
-
-    # --- Entity 3: N-terminal CDR flank (designed) ---
-    n_flank = {"protein": {"id": "NF", "fuse": chain_id, "sequence": flank_n}}
-
-    # --- Entity 4: Grafted motif / hotspot fragments ---
-    # Collect all fragments across all motif chains.  Each chain may contain
-    # one or more contiguous fragments; residues on different chains are always
-    # separate fragments.
-    all_fragments = []  # list of (chain_id, [res_nums])
+    all_fragments = []
     for mc in motif_chains:
         chain_frags = detect_fragments(input_pdb, mc)
         for frag in chain_frags:
             all_fragments.append((mc, frag))
 
     if len(all_fragments) == 1:
-        # Single contiguous motif on one chain
         mc, frag = all_fragments[0]
-        motif_entities = [
+        desc = f"contiguous ({len(frag)} residues on chain {mc})"
+        return [
             {
                 "file": {
                     "path": input_rel,
@@ -489,40 +354,24 @@ def generate_graft_yaml(
                     ],
                 }
             }
-        ]
-        print(
-            f"  Motif: contiguous ({len(frag)} residues on chain {mc})",
-            file=sys.stderr,
-        )
-    else:
-        # Hotspot mode: alternating fragment + designed linker entities
-        motif_entities = []
-        total_hotspot_res = sum(len(f) for _, f in all_fragments)
-        print(
-            f"  Motif: {len(all_fragments)} disconnected fragments across "
-            f"chain(s) {','.join(motif_chains)} "
-            f"({total_hotspot_res} hotspot residues, linkers: {linker_length})",
-            file=sys.stderr,
-        )
-        # Count total residues per motif chain to detect whole-chain fragments
-        chain_res_counts = {}
-        for mc, frag in all_fragments:
-            chain_res_counts.setdefault(mc, 0)
-            chain_res_counts[mc] += len(frag)
+        ], desc
 
-        for i, (mc, fragment) in enumerate(all_fragments):
-            # Fragment entity: anchored, not designed
-            # If the fragment spans the entire chain, include the whole chain
-            # (BoltzGen's res_index uses 1-indexed positions within the chain,
-            # not PDB residue numbers, so large PDB numbers would be out of bounds)
-            chain_frags_for_mc = [f for c, f in all_fragments if c == mc]
-            is_whole_chain = len(chain_frags_for_mc) == 1
-            if is_whole_chain:
-                include_entry = {"chain": {"id": mc}}
-            else:
-                res_index = format_range(fragment[0], fragment[-1])
-                include_entry = {"chain": {"id": mc, "res_index": res_index}}
-            frag_entity = {
+    entities = []
+    total_res = sum(len(f) for _, f in all_fragments)
+    desc = (
+        f"{len(all_fragments)} fragments across chain(s) "
+        f"{','.join(motif_chains)} ({total_res} residues, linkers: {linker_length})"
+    )
+    for i, (mc, fragment) in enumerate(all_fragments):
+        chain_frags_for_mc = [f for c, f in all_fragments if c == mc]
+        is_whole_chain = len(chain_frags_for_mc) == 1
+        if is_whole_chain:
+            include_entry = {"chain": {"id": mc}}
+        else:
+            res_index = format_range(fragment[0], fragment[-1])
+            include_entry = {"chain": {"id": mc, "res_index": res_index}}
+        entities.append(
+            {
                 "file": {
                     "path": input_rel,
                     "fuse": chain_id,
@@ -533,87 +382,244 @@ def generate_graft_yaml(
                     ],
                 }
             }
-            motif_entities.append(frag_entity)
-
-            # Designed linker between fragments (not after last)
-            if i < len(all_fragments) - 1:
-                linker_id = f"LK{i + 1}"
-                linker_entity = {
+        )
+        if i < len(all_fragments) - 1:
+            entities.append(
+                {
                     "protein": {
-                        "id": linker_id,
+                        "id": f"LK{cdr_num}_{i + 1}",
                         "fuse": chain_id,
                         "sequence": linker_length,
                     }
                 }
-                motif_entities.append(linker_entity)
+            )
+    return entities, desc
 
-    # --- Entity 5: C-terminal CDR flank (designed) ---
-    c_flank = {"protein": {"id": "CF", "fuse": chain_id, "sequence": flank_c}}
 
-    # --- Entity 6: Nanobody framework post-graft CDR ---
-    post_design_ranges = [cdr for _, cdr in post_cdrs]
-    post_exclude_entries = []
-    post_insertions = []
-    post_vis0_ranges = list(post_design_ranges)
+def _build_framework_section(
+    scaffold_pdb_rel, chain_id, res_range_str, non_graft_cdrs,
+    scaffold_info, cdr_lengths, extra_vis0, is_first,
+):
+    """Build a framework section entity.
 
-    for orig_idx, cdr_range in post_cdrs:
+    Parameters
+    ----------
+    res_range_str : str
+        Residue range string for this section (e.g., '..25', '35..97', '119..').
+    non_graft_cdrs : list of (orig_idx, cdr_range)
+        CDRs that fall within this section and should be designed.
+    is_first : bool
+        If True, includes reset_res_index and no fuse.
+    """
+    design_ranges = [cdr for _, cdr in non_graft_cdrs]
+    exclude_entries = []
+    insertions = []
+
+    for orig_idx, cdr_range in non_graft_cdrs:
         cdr_num = orig_idx + 1
-        length_override = cdr_lengths.get(cdr_num, DEFAULT_CDR_LENGTHS[cdr_num])
-        scaffold_ins = scaffold_info["insertions"][orig_idx] if orig_idx < len(scaffold_info["insertions"]) else None
+        length_override = cdr_lengths.get(cdr_num, DEFAULT_CDR_LENGTHS.get(cdr_num))
+        scaffold_ins = (
+            scaffold_info["insertions"][orig_idx]
+            if orig_idx < len(scaffold_info["insertions"])
+            else None
+        )
         excl, ins = build_cdr_design(
             chain_id, cdr_range, scaffold_info["excludes"][orig_idx],
             scaffold_ins, length_override,
         )
-        post_exclude_entries.extend(excl)
-        post_insertions.extend(ins)
+        exclude_entries.extend(excl)
+        insertions.extend(ins)
 
-    for vr in scaffold_info["extra_vis0"]:
-        if vr[0] > cdr_end:
-            post_vis0_ranges.append(vr)
-
-    post_structure_groups = [{"group": {"id": chain_id, "visibility": 2}}]
-    if post_vis0_ranges:
-        post_structure_groups.append(
+    vis0_ranges = list(design_ranges) + list(extra_vis0)
+    structure_groups = [{"group": {"id": chain_id, "visibility": 2}}]
+    if vis0_ranges:
+        structure_groups.append(
             {
                 "group": {
                     "id": chain_id,
                     "visibility": 0,
-                    "res_index": format_ranges(post_vis0_ranges),
+                    "res_index": format_ranges(vis0_ranges),
                 }
             }
         )
 
-    post_framework = {
+    section = {
         "file": {
             "path": scaffold_pdb_rel,
-            "fuse": chain_id,
             "include": [
-                {"chain": {"id": chain_id, "res_index": f"{cdr_end + 1}.."}}
+                {"chain": {"id": chain_id, "res_index": res_range_str}}
             ],
-            "structure_groups": post_structure_groups,
+            "structure_groups": structure_groups,
         }
     }
-    if post_design_ranges:
-        post_framework["file"]["design"] = [
-            {
-                "chain": {
-                    "id": chain_id,
-                    "res_index": format_ranges(post_design_ranges),
-                }
-            }
+    if is_first:
+        section["file"]["reset_res_index"] = [{"chain": {"id": chain_id}}]
+    else:
+        section["file"]["fuse"] = chain_id
+
+    if design_ranges:
+        section["file"]["design"] = [
+            {"chain": {"id": chain_id, "res_index": format_ranges(design_ranges)}}
         ]
-    if post_exclude_entries:
-        post_framework["file"]["exclude"] = post_exclude_entries
-    if post_insertions:
-        post_framework["file"]["design_insertions"] = post_insertions
+    if exclude_entries:
+        section["file"]["exclude"] = exclude_entries
+    if insertions:
+        section["file"]["design_insertions"] = insertions
 
-    # Assemble the full design YAML
-    entities = [target_entity, pre_framework, n_flank]
-    entities.extend(motif_entities)
-    entities.extend([c_flank, post_framework])
+    return section
+
+
+def generate_graft_yaml(
+    input_pdb,
+    target_chain,
+    scaffold_info,
+    output_dir,
+    cdr_motif_map,
+    flank_n="2..5",
+    flank_c="2..5",
+    cdr_lengths=None,
+    linker_length="1..6",
+    motif_noise=0.0,
+):
+    """Generate a BoltzGen design YAML for motif grafting.
+
+    Supports grafting motif residues into one or multiple CDRs simultaneously.
+    The generated YAML constructs the nanobody chain by fusing framework sections
+    with graft blocks (flank + motif fragments + flank) at each graft CDR.
+
+    Parameters
+    ----------
+    cdr_motif_map : dict[int, list[str]]
+        Mapping of CDR numbers to motif chain IDs.
+        Single CDR: ``{3: ["B", "C"]}`` — both chains grafted into CDR3.
+        Multi CDR: ``{2: ["B"], 3: ["C"]}`` — chain B → CDR2, chain C → CDR3.
+    cdr_lengths : dict, optional
+        Override CDR lengths for non-graft CDRs.
+    linker_length : str
+        Length range for designed linkers between hotspot fragments (default: '1..6').
+    motif_noise : float
+        Gaussian noise σ (Å) on motif side-chain atoms for soft flexibility.
+    """
+    if cdr_lengths is None:
+        cdr_lengths = {}
+
+    chain_id = scaffold_info["chain_id"]
+    cdrs = scaffold_info["cdrs"]
+    input_rel = make_relative(Path(input_pdb).resolve(), output_dir)
+    scaffold_pdb_rel = make_relative(scaffold_info["pdb_path"], output_dir)
+
+    if chain_id == target_chain:
+        print(
+            f"Warning: scaffold chain '{chain_id}' collides with target chain "
+            f"'{target_chain}'. BoltzGen will auto-rename, but verify with "
+            f"'boltzgen check'.",
+            file=sys.stderr,
+        )
+
+    # Sort graft CDRs by position
+    graft_cdr_nums = sorted(cdr_motif_map.keys())
+    graft_cdr_indices = [n - 1 for n in graft_cdr_nums]  # 0-indexed
+
+    # Determine non-graft CDRs and which framework section they belong to.
+    # Sections are numbered 0..N where N = len(graft_cdr_nums).
+    # Section boundaries are defined by graft CDR start/end positions.
+    all_cdr_indices = list(range(len(cdrs)))
+    non_graft_indices = [i for i in all_cdr_indices if i not in graft_cdr_indices]
+
+    # Compute section boundaries: list of (section_start, section_end) in scaffold residue numbers
+    # Section 0: start of chain .. first graft CDR start - 1
+    # Section k (mid): prev graft CDR end + 1 .. next graft CDR start - 1
+    # Section N: last graft CDR end + 1 .. end of chain
+    section_boundaries = []
+    for s in range(len(graft_cdr_nums) + 1):
+        if s == 0:
+            sec_end = cdrs[graft_cdr_indices[0]][0] - 1
+            section_boundaries.append((None, sec_end))  # None = start of chain
+        elif s == len(graft_cdr_nums):
+            sec_start = cdrs[graft_cdr_indices[-1]][1] + 1
+            section_boundaries.append((sec_start, None))  # None = end of chain
+        else:
+            sec_start = cdrs[graft_cdr_indices[s - 1]][1] + 1
+            sec_end = cdrs[graft_cdr_indices[s]][0] - 1
+            section_boundaries.append((sec_start, sec_end))
+
+    # Assign non-graft CDRs to sections based on position
+    section_cdrs = [[] for _ in range(len(graft_cdr_nums) + 1)]
+    for idx in non_graft_indices:
+        cdr_start, cdr_end = cdrs[idx]
+        for s, (sec_s, sec_e) in enumerate(section_boundaries):
+            s_start = sec_s if sec_s is not None else 0
+            s_end = sec_e if sec_e is not None else 99999
+            if cdr_start >= s_start and cdr_end <= s_end:
+                section_cdrs[s].append((idx, cdrs[idx]))
+                break
+
+    # Assign extra_vis0 ranges to sections
+    section_vis0 = [[] for _ in range(len(graft_cdr_nums) + 1)]
+    for vr in scaffold_info["extra_vis0"]:
+        for s, (sec_s, sec_e) in enumerate(section_boundaries):
+            s_start = sec_s if sec_s is not None else 0
+            s_end = sec_e if sec_e is not None else 99999
+            if vr[0] >= s_start and vr[1] <= s_end:
+                section_vis0[s].append(vr)
+                break
+
+    # --- Build entities ---
+    # Target protein
+    entities = [
+        {
+            "file": {
+                "path": input_rel,
+                "include": [{"chain": {"id": target_chain}}],
+            }
+        }
+    ]
+
+    # Interleave: framework section → [flank_N, motif, flank_C] → next section
+    for s in range(len(graft_cdr_nums) + 1):
+        sec_s, sec_e = section_boundaries[s]
+
+        # Skip empty mid-sections (adjacent graft CDRs with no residues between)
+        if sec_s is not None and sec_e is not None and sec_s > sec_e:
+            pass  # no framework residues in this section
+        else:
+            if sec_s is None:
+                res_range = f"..{sec_e}"
+            elif sec_e is None:
+                res_range = f"{sec_s}.."
+            else:
+                res_range = f"{sec_s}..{sec_e}"
+
+            section = _build_framework_section(
+                scaffold_pdb_rel, chain_id, res_range,
+                section_cdrs[s], scaffold_info, cdr_lengths,
+                section_vis0[s], is_first=(s == 0),
+            )
+            entities.append(section)
+
+        # After each section (except the last), insert the graft block
+        if s < len(graft_cdr_nums):
+            cdr_num = graft_cdr_nums[s]
+            mc_list = cdr_motif_map[cdr_num]
+
+            # N-terminal flank
+            entities.append(
+                {"protein": {"id": f"NF{cdr_num}", "fuse": chain_id, "sequence": flank_n}}
+            )
+
+            # Motif fragments + linkers
+            motif_ents, desc = _build_motif_entities(
+                input_pdb, input_rel, mc_list, chain_id, linker_length, cdr_num,
+            )
+            print(f"  CDR{cdr_num} motif: {desc}", file=sys.stderr)
+            entities.extend(motif_ents)
+
+            # C-terminal flank
+            entities.append(
+                {"protein": {"id": f"CF{cdr_num}", "fuse": chain_id, "sequence": flank_c}}
+            )
+
     design = {"entities": entities}
-
-    # Add motif noise if specified (σ in Å for template coordinate perturbation)
     if motif_noise > 0:
         design["motif_noise"] = motif_noise
 
@@ -684,7 +690,17 @@ Example:
         type=int,
         default=3,
         choices=[1, 2, 3],
-        help="Which CDR to graft the motif into (default: 3)",
+        help="Which CDR to graft the motif into (default: 3). "
+             "Ignored when --cdr-motif is used.",
+    )
+    parser.add_argument(
+        "--cdr-motif",
+        nargs="+",
+        metavar="CDR:CHAINS",
+        default=None,
+        help="Map CDR numbers to motif chains for multi-CDR grafting. "
+             "E.g. --cdr-motif 2:B 3:C (CDR2 gets chain B, CDR3 gets chain C). "
+             "Overrides --cdr and --motif-chain.",
     )
     parser.add_argument(
         "--flank-n",
@@ -742,31 +758,51 @@ Example:
             print(f"No scaffolds found in {default_scaffolds}")
         return
 
-    # Auto-detect chains if not specified
-    if args.target_chain and args.motif_chain:
-        target_chain = args.target_chain
-        motif_chains = [c.strip() for c in args.motif_chain.split(",")]
-    else:
-        detected_target, detected_motif_chains = detect_chains(args.input)
+    # Build cdr_motif_map: {cdr_num: [chain_ids]}
+    if args.cdr_motif:
+        # Multi-CDR mode: parse --cdr-motif specs
+        cdr_motif_map = {}
+        for spec in args.cdr_motif:
+            cdr_str, chains_str = spec.split(":", 1)
+            cdr_num = int(cdr_str)
+            cdr_motif_map[cdr_num] = [c.strip() for c in chains_str.split(",")]
+        # Auto-detect target chain
+        detected_target, _ = detect_chains(args.input)
         target_chain = args.target_chain or detected_target
-        if args.motif_chain:
-            motif_chains = [c.strip() for c in args.motif_chain.split(",")]
-        else:
-            motif_chains = detected_motif_chains
         print(
-            f"Auto-detected chains: target={target_chain}, motif={','.join(motif_chains)}",
+            "Multi-CDR grafting: " + ", ".join(
+                f"CDR{k}={','.join(v)}" for k, v in sorted(cdr_motif_map.items())
+            ),
             file=sys.stderr,
         )
+    else:
+        # Single-CDR mode (backward-compatible)
+        if args.target_chain and args.motif_chain:
+            target_chain = args.target_chain
+            motif_chains = [c.strip() for c in args.motif_chain.split(",")]
+        else:
+            detected_target, detected_motif_chains = detect_chains(args.input)
+            target_chain = args.target_chain or detected_target
+            if args.motif_chain:
+                motif_chains = [c.strip() for c in args.motif_chain.split(",")]
+            else:
+                motif_chains = detected_motif_chains
+            print(
+                f"Auto-detected chains: target={target_chain}, motif={','.join(motif_chains)}",
+                file=sys.stderr,
+            )
+        cdr_motif_map = {args.cdr: motif_chains}
 
     # Build CDR length overrides (only for non-graft CDRs)
+    graft_cdrs = set(cdr_motif_map.keys())
     cdr_lengths = {}
     cdr_length_args = {1: args.cdr1_length, 2: args.cdr2_length, 3: args.cdr3_length}
     for cdr_num, length_spec in cdr_length_args.items():
-        if cdr_num == args.cdr:
+        if cdr_num in graft_cdrs:
             if length_spec is not None:
                 print(
                     f"Warning: --cdr{cdr_num}-length is ignored because CDR{cdr_num} "
-                    f"is the graft target (replaced by motif + flanks)",
+                    f"is a graft target (replaced by motif + flanks)",
                     file=sys.stderr,
                 )
             continue
@@ -782,41 +818,36 @@ Example:
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    common_kwargs = dict(
+        input_pdb=args.input,
+        target_chain=target_chain,
+        cdr_motif_map=cdr_motif_map,
+        flank_n=args.flank_n,
+        flank_c=args.flank_c,
+        cdr_lengths=cdr_lengths,
+        linker_length=args.linker_length,
+        motif_noise=args.motif_noise,
+    )
+
     if len(scaffold_infos) == 1:
-        # Single scaffold: generate one YAML
         design = generate_graft_yaml(
-            input_pdb=args.input,
-            target_chain=target_chain,
-            motif_chains=motif_chains,
             scaffold_info=scaffold_infos[0],
             output_dir=output_path.parent,
-            cdr_target=args.cdr,
-            flank_n=args.flank_n,
-            flank_c=args.flank_c,
-            cdr_lengths=cdr_lengths,
-            linker_length=args.linker_length,
-            motif_noise=args.motif_noise,
+            **common_kwargs,
         )
         with open(output_path, "w") as f:
             yaml.dump(design, f, default_flow_style=False, sort_keys=False)
         print(f"Generated: {output_path}", file=sys.stderr)
     else:
-        # Multiple scaffolds: generate one YAML per scaffold
         stem = output_path.stem
         suffix = output_path.suffix
         for i, scaffold_info in enumerate(scaffold_infos):
             scaffold_name = Path(args.scaffold[i]).stem
             out_file = output_path.parent / f"{stem}_{scaffold_name}{suffix}"
             design = generate_graft_yaml(
-                input_pdb=args.input,
-                target_chain=target_chain,
-                motif_chains=motif_chains,
                 scaffold_info=scaffold_info,
                 output_dir=output_path.parent,
-                cdr_target=args.cdr,
-                flank_n=args.flank_n,
-                flank_c=args.flank_c,
-                cdr_lengths=cdr_lengths,
+                **common_kwargs,
             )
             with open(out_file, "w") as f:
                 yaml.dump(design, f, default_flow_style=False, sort_keys=False)

@@ -578,12 +578,16 @@ class AtomDiffusion(Module):
             non_designed_resolved = ((1 - atom_design_mask) * atom_resolved).bool()
             inpaint_mask = (non_designed_resolved & ~backbone_mask)
             inpaint_mask = inpaint_mask.repeat_interleave(multiplicity, 0)
-            input_coords = feats["coords"].repeat_interleave(multiplicity, 0)
+            # coords may have an ensemble dim (B, 1, N_atoms, 3) — squeeze to (B, N_atoms, 3)
+            coords_for_inpaint = feats["coords"]
+            if coords_for_inpaint.dim() == 4:
+                coords_for_inpaint = coords_for_inpaint[:, 0]
+            input_coords = coords_for_inpaint.repeat_interleave(multiplicity, 0)
 
             # Apply motif noise to inpainted side-chain atoms
             motif_noise_sigma = feats.get("motif_noise_sigma", 0.0)
             if isinstance(motif_noise_sigma, torch.Tensor):
-                motif_noise_sigma = motif_noise_sigma.item()
+                motif_noise_sigma = motif_noise_sigma.flatten()[0].item()
             if motif_noise_sigma > 0:
                 motif_perturbation = motif_noise_sigma * torch.randn_like(input_coords)
                 input_coords = input_coords + motif_perturbation * inpaint_mask.unsqueeze(-1)

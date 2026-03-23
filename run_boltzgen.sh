@@ -19,10 +19,10 @@ RESULTS_DIR="results"                        # Where to write BoltzGen results
 
 # --- Grafting ---
 CDR=3                                        # Which CDR to graft motif into (1, 2, or 3)
-FLANK_N="2..5"                               # N-terminal flank length range
-FLANK_C="2..5"                               # C-terminal flank length range
+FLANK_N="2..9"                               # N-terminal flank length range
+FLANK_C="2..9"                               # C-terminal flank length range
 LINKER_LENGTH=""                             # Linker length between disconnected hotspot fragments (default: 1..6)
-MOTIF_NOISE=0.3                              # Gaussian noise σ (Å) on motif template coords (0=rigid, 0.3=slight flex, 1.0=loose)
+MOTIF_NOISE=0.2                              # Gaussian noise σ (Å) on motif template coords (0=rigid, 0.3=slight flex, 1.0=loose)
 
 # --- CDR lengths (leave empty for natural defaults: CDR1=5..13, CDR2=3..10, CDR3=10..25) ---
 CDR1_LENGTH=""
@@ -30,7 +30,7 @@ CDR2_LENGTH=""
 CDR3_LENGTH=""                               # Only used if this CDR is NOT the graft target
 
 # --- BoltzGen pipeline ---
-NUM_DESIGNS=50                               # Number of designs per scaffold
+NUM_DESIGNS=1000                               # Number of designs per scaffold
 PROTOCOL="nanobody-anything"                 # BoltzGen protocol
 
 # =============================================================================
