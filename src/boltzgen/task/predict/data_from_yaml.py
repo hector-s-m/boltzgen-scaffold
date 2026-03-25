@@ -290,11 +290,17 @@ class PredictionDataset(torch.utils.data.Dataset):
         # set chain_design_mask
         features["chain_design_mask"] = torch.from_numpy(chain_design_mask)
 
-        # Pass motif_noise_sigma to diffusion for side-chain inpainting perturbation.
-        # The noise is applied to all fixed (non-designed) atom coordinates during
-        # diffusion inpainting, giving side chains soft flexibility while keeping
-        # backbone anchored by the template distogram (center_coords stay clean).
-        features["motif_noise_sigma"] = torch.tensor(motif_noise_sigma)
+        # Apply motif noise: perturb center_coords of non-designed residues
+        # to soften the template distogram prior.  This gives the model slight
+        # flexibility in placing the motif while keeping it near its docked pose.
+        # The perturbation is applied to center_coords (token-level Cα positions)
+        # which feed into the structure-group distogram features.
+        if motif_noise_sigma > 0:
+            design_mask_np = features["design_mask"].numpy().astype(bool)
+            non_designed = ~design_mask_np
+            if non_designed.any():
+                noise = np.random.randn(int(non_designed.sum()), 3).astype(np.float32)
+                features["center_coords"][non_designed] += motif_noise_sigma * torch.from_numpy(noise)
 
         # Compute template features
         templates_features = load_dummy_templates(
