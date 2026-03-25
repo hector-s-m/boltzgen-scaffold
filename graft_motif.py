@@ -480,6 +480,7 @@ def generate_graft_yaml(
     cdr_lengths=None,
     linker_length="1..6",
     motif_noise=0.0,
+    target_residues=None,
 ):
     """Generate a BoltzGen design YAML for motif grafting.
 
@@ -499,6 +500,10 @@ def generate_graft_yaml(
         Length range for designed linkers between hotspot fragments (default: '1..6').
     motif_noise : float
         Gaussian noise σ (Å) on motif side-chain atoms for soft flexibility.
+    target_residues : str, optional
+        Comma-separated residue numbers on the target chain to mark as binding
+        site (e.g. '53,57,60,61,75'). Tells BoltzGen where the nanobody should
+        make contacts.
     """
     if cdr_lengths is None:
         cdr_lengths = {}
@@ -566,14 +571,17 @@ def generate_graft_yaml(
 
     # --- Build entities ---
     # Target protein
-    entities = [
-        {
-            "file": {
-                "path": input_rel,
-                "include": [{"chain": {"id": target_chain}}],
-            }
+    target_entity = {
+        "file": {
+            "path": input_rel,
+            "include": [{"chain": {"id": target_chain}}],
         }
-    ]
+    }
+    if target_residues:
+        target_entity["file"]["binding_types"] = {
+            "binding": target_residues,
+        }
+    entities = [target_entity]
 
     # Interleave: framework section → [flank_N, motif, flank_C] → next section
     for s in range(len(graft_cdr_nums) + 1):
@@ -741,6 +749,12 @@ Example:
              "0 = rigid (default), 0.3 = slight flex, 1.0 = loose.",
     )
     parser.add_argument(
+        "--target-residues",
+        default=None,
+        help="Comma-separated residue numbers on the target chain to mark as binding site "
+             "(e.g. '53,57,60,61,75'). Guides the nanobody to interact with these positions.",
+    )
+    parser.add_argument(
         "--list-scaffolds",
         action="store_true",
         help="List available nanobody scaffolds and exit",
@@ -827,6 +841,7 @@ Example:
         cdr_lengths=cdr_lengths,
         linker_length=args.linker_length,
         motif_noise=args.motif_noise,
+        target_residues=args.target_residues,
     )
 
     if len(scaffold_infos) == 1:
