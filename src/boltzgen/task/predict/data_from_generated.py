@@ -396,6 +396,19 @@ class FromGeneratedDataset(torch.utils.data.Dataset):
             raise DataFetchException() from e
 
         # Propagate design mask to obtain chain_design_mask (True whenever something is covalently bound to any residue that is in a chain that contains a design residue).
+        # Truncate/pad design_mask to match tokenized length — the CIF may have
+        # fewer tokens than the metadata if trailing unresolved residues were trimmed.
+        n_tokens = len(tokenized.tokens["asym_id"])
+        if len(design_mask) > n_tokens:
+            design_mask = design_mask[:n_tokens]
+        elif len(design_mask) < n_tokens:
+            design_mask = np.pad(design_mask, (0, n_tokens - len(design_mask)), constant_values=0)
+        if ss_type is not None and len(ss_type) != n_tokens:
+            ss_type = ss_type[:n_tokens] if len(ss_type) > n_tokens else np.pad(ss_type, (0, n_tokens - len(ss_type)), constant_values=0)
+        if binding_type is not None and len(binding_type) != n_tokens:
+            binding_type = binding_type[:n_tokens] if len(binding_type) > n_tokens else np.pad(binding_type, (0, n_tokens - len(binding_type)), constant_values=0)
+        if aa_constraint_mask is not None and len(aa_constraint_mask) != n_tokens:
+            aa_constraint_mask = aa_constraint_mask[:n_tokens] if len(aa_constraint_mask) > n_tokens else np.pad(aa_constraint_mask, ((0, n_tokens - len(aa_constraint_mask)), (0, 0)), constant_values=0)
         chain_design_mask = design_mask.astype(bool)
         asym_id = tokenized.tokens["asym_id"]
         while True:
