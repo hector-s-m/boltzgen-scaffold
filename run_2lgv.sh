@@ -9,7 +9,7 @@ set -euo pipefail
 # --- Tunable parameters ---
 INPUT_PDB="input/2LGV_des.pdb"
 SCAFFOLD="example/nanobody_scaffolds/7eow.yaml"
-NUM_DESIGNS=50              # per configuration
+NUM_DESIGNS=100             # per configuration
 PROTOCOL="nanobody-anything"
 FLANK_N="2..5"
 FLANK_C="2..5"
