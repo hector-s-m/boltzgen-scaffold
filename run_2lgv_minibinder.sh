@@ -11,9 +11,9 @@ set -euo pipefail
 INPUT_PDB="input/2LGV_des.pdb"
 NUM_DESIGNS=10              # set to 1000 for production
 PROTOCOL="protein-anything"
-BINDER_MIN=50               # min binder length
-BINDER_MAX=80               # max binder length
-LINKER_LENGTH="3..12"       # linkers between hotspot fragments
+NTAIL="15..30"              # N-terminal designed segment
+CTAIL="15..30"              # C-terminal designed segment
+LINKER_LENGTH="3..10"       # linkers between hotspot fragments
 MOTIF_NOISE=0.3             # σ (Å) for template coordinate perturbation
 TARGET_RESIDUES="53,57,60,61,75"  # PHE53, PHE75, SER57, LYS61, LEU60
 
@@ -25,7 +25,7 @@ echo "================================================"
 echo "  2LGV Minibinder Design (de novo)"
 echo "================================================"
 echo "Input:           $INPUT_PDB"
-echo "Binder size:     ${BINDER_MIN}..${BINDER_MAX} residues"
+echo "Binder size:     ~${NTAIL%%..* }+${CTAIL%%..* }+2*${LINKER_LENGTH%%..* }+3 to ~${NTAIL##*..}+${CTAIL##*..}+2*${LINKER_LENGTH##*..}+3 residues"
 echo "Designs:         $NUM_DESIGNS"
 echo "Target residues: $TARGET_RESIDUES"
 echo ""
@@ -41,7 +41,7 @@ input_rel = os.path.relpath('${INPUT_PDB}', '${DESIGNS_DIR}')
 design = {
     'entities': [
         # N-terminal designed segment
-        {'protein': {'id': 'B', 'sequence': '10..25'}},
+        {'protein': {'id': 'B', 'sequence': '${NTAIL}'}},
         # Hotspot 1: PHE from chain B
         {'file': {
             'path': input_rel, 'fuse': 'B',
@@ -68,16 +68,13 @@ design = {
             'structure_groups': [{'group': {'id': 'D', 'visibility': 1}}],
         }},
         # C-terminal designed segment
-        {'protein': {'id': 'CT', 'fuse': 'B', 'sequence': '10..25'}},
+        {'protein': {'id': 'CT', 'fuse': 'B', 'sequence': '${CTAIL}'}},
         # Target protein
         {'file': {
             'path': input_rel,
             'include': [{'chain': {'id': 'A'}}],
             'binding_types': [{'chain': {'id': 'A', 'binding': '${TARGET_RESIDUES}'}}],
         }},
-    ],
-    'constraints': [
-        {'total_len': {'id': 'B', 'min': ${BINDER_MIN}, 'max': ${BINDER_MAX}}},
     ],
     'motif_noise': ${MOTIF_NOISE},
 }
