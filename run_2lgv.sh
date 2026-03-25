@@ -19,7 +19,7 @@ TARGET_RESIDUES="53,57,60,61,75"  # PHE53, PHE75, SER57, LYS61, LEU60
 
 # --- Configurations ---
 # 1. All hotspots → CDR3
-# 2. All hotspots → CDR2
+# 2. B(PHE) → CDR2, C(PHE)+D(TRP) → CDR3
 # 3. TRP (D) → CDR2, both PHE (B,C) → CDR3
 # 4. TRP (D) → CDR1, both PHE (B,C) → CDR3
 # 5. B(PHE) → CDR1, C(PHE) → CDR2, D(TRP) → CDR3
@@ -66,9 +66,9 @@ run_config() {
 run_config "config1_all_cdr3" "Config 1: B,C,D → CDR3" \
     --cdr-motif 3:B,C,D
 
-# Config 2: All hotspots → CDR2
-run_config "config2_all_cdr2" "Config 2: B,C,D → CDR2" \
-    --cdr-motif 2:B,C,D
+# Config 2: B(PHE) → CDR2, C(PHE)+D(TRP) → CDR3
+run_config "config2_B_cdr2_CD_cdr3" "Config 2: B → CDR2, C,D → CDR3" \
+    --cdr-motif 2:B 3:C,D
 
 # Config 3: TRP (D) → CDR2, both PHE (B,C) → CDR3
 run_config "config3_D_cdr2_BC_cdr3" "Config 3: D → CDR2, B,C → CDR3" \
