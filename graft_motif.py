@@ -578,9 +578,9 @@ def generate_graft_yaml(
         }
     }
     if target_residues:
-        target_entity["file"]["binding_types"] = {
-            "binding": target_residues,
-        }
+        target_entity["file"]["binding_types"] = [
+            {"chain": {"id": target_chain, "binding": target_residues}},
+        ]
     entities = [target_entity]
 
     # Interleave: framework section → [flank_N, motif, flank_C] → next section
